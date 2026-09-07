@@ -18,7 +18,7 @@
 use serde_json::{json, Map, Value};
 
 use xd_core::command::{Command, End, Reorder};
-use xd_core::doc::{Doc, COALESCE_WINDOW_MS};
+use xd_core::doc::{index_between, indices_between, Doc, COALESCE_WINDOW_MS};
 use xd_core::geometry::Bounds;
 use xd_core::ids::Rng;
 use xd_core::scene::{Binding, ElementKind, Scene};
@@ -385,18 +385,264 @@ fn forward_does_not_let_a_selection_overtake_itself() {
 }
 
 #[test]
-fn reorder_touches_no_element_field() {
+fn a_reorder_that_changes_nothing_is_not_history() {
+    // "rect" is already at the back, so sending it to the back is a no-op —
+    // no index written, no version moved, no undo entry.
     let mut doc = seed_doc();
     let before = get(&doc, "rect").clone();
+    let rev = doc.revision();
     doc.apply(Command::Reorder {
         ids: vec!["rect".to_string()],
         how: Reorder::Back,
     });
-    assert_eq!(
-        get(&doc, "rect"),
-        &before,
-        "z-order is an array position; no element field changed, so no version moved"
+    assert_eq!(get(&doc, "rect"), &before);
+    assert_eq!(doc.revision(), rev);
+    assert!(!doc.can_undo());
+}
+
+// ---------------------------------------------------------------------------
+// Fractional indexing
+//
+// excalidraw.com re-sorts by `index` on load, so an edit that moves array
+// positions without moving keys is an edit that does not travel. These pin the
+// key generator on its own and then pin the two commands that write keys.
+// ---------------------------------------------------------------------------
+
+/// Every element that carries an `index` must carry one greater than the last
+/// indexed element before it. This is the property excalidraw.com relies on;
+/// if it does not hold, the drawing opens over there in a different order than
+/// it has here.
+fn assert_indices_agree_with_order(doc: &Doc, context: &str) {
+    let mut last: Option<&str> = None;
+    for e in doc.elements() {
+        let Some(k) = e.index.as_deref() else { continue };
+        if let Some(prev) = last {
+            assert!(
+                prev < k,
+                "{context}: index {k:?} on {} does not sort after {prev:?}",
+                e.id
+            );
+        }
+        last = Some(k);
+    }
+}
+
+#[test]
+fn fuzz_generated_indices_sort_where_they_were_asked_to() {
+    let mut rng = Rng::new(0xf00d);
+    let mut keys: Vec<String> = Vec::new();
+    for step in 0..2000u64 {
+        let pos = if keys.is_empty() {
+            0
+        } else {
+            (rng.next_u64() % (keys.len() as u64 + 1)) as usize
+        };
+        let lower = if pos == 0 {
+            None
+        } else {
+            Some(keys[pos - 1].clone())
+        };
+        let upper = keys.get(pos).cloned();
+        let key = index_between(lower.as_deref(), upper.as_deref())
+            .unwrap_or_else(|| panic!("step {step}: no key between {lower:?} and {upper:?}"));
+        if let Some(l) = &lower {
+            assert!(l.as_str() < key.as_str(), "step {step}: {key:?} <= {l:?}");
+        }
+        if let Some(u) = &upper {
+            assert!(key.as_str() < u.as_str(), "step {step}: {key:?} >= {u:?}");
+        }
+        keys.insert(pos, key);
+    }
+    assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys fell out of order");
+    let unique: std::collections::HashSet<&String> = keys.iter().collect();
+    assert_eq!(unique.len(), keys.len(), "two elements got the same index");
+}
+
+#[test]
+fn appending_keeps_keys_short() {
+    // The common case by far: every new shape goes on top. Appending must not
+    // make the keys grow, or a long drawing session bloats the file.
+    let mut last: Option<String> = None;
+    let mut keys = Vec::new();
+    for _ in 0..1000 {
+        let k = index_between(last.as_deref(), None).expect("appending never runs out");
+        last = Some(k.clone());
+        keys.push(k);
+    }
+    assert!(keys.windows(2).all(|w| w[0] < w[1]));
+    let longest = keys.iter().map(String::len).max().unwrap();
+    assert!(longest <= 3, "a thousand appends grew to {longest} characters");
+}
+
+#[test]
+fn repeated_insertion_at_one_spot_never_collides() {
+    // The algorithm's genuine worst case: always taking the same slot makes
+    // each key one character longer than the last. It stays correct, and it
+    // stays linear — it does not blow up, and it never repeats itself.
+    let mut upper = "a1".to_string();
+    let mut made = Vec::new();
+    for _ in 0..200 {
+        let k = index_between(Some("a0"), Some(&upper)).expect("the space never runs out");
+        assert!("a0" < k.as_str() && k.as_str() < upper.as_str());
+        upper = k.clone();
+        made.push(k);
+    }
+    let unique: std::collections::HashSet<&String> = made.iter().collect();
+    assert_eq!(unique.len(), made.len());
+    let longest = made.iter().map(String::len).max().unwrap();
+    assert!(longest <= 2 + made.len(), "growth is worse than one char a step");
+}
+
+#[test]
+fn a_run_of_keys_between_two_neighbours_is_bisected_not_chained() {
+    let keys = indices_between(Some("a0"), Some("a1"), 50);
+    assert_eq!(keys.len(), 50);
+    assert!(keys.windows(2).all(|w| w[0] < w[1]));
+    assert!(keys.iter().all(|k| k.as_str() > "a0" && k.as_str() < "a1"));
+    let longest = keys.iter().map(String::len).max().unwrap();
+    assert!(
+        longest <= 10,
+        "bisecting 50 keys into one gap grew to {longest} characters — chained, not split?"
     );
+}
+
+#[test]
+fn a_key_we_do_not_understand_is_declined_rather_than_guessed() {
+    assert_eq!(index_between(None, None).as_deref(), Some("a0"));
+    assert!(index_between(Some("not a key"), None).is_none());
+    assert!(index_between(Some("a1"), Some("a1")).is_none());
+    assert!(index_between(Some("a2"), Some("a1")).is_none(), "out of order");
+    // A trailing zero makes a key ambiguous ("a01" and "a010" name one spot).
+    assert!(index_between(Some("a010"), None).is_none());
+}
+
+#[test]
+fn reorder_reindexes_only_what_moved_and_bumps_only_those() {
+    let mut doc = seed_doc();
+    let before: Vec<(String, Option<String>, i64)> = doc
+        .elements()
+        .iter()
+        .map(|e| (e.id.clone(), e.index.clone(), e.version))
+        .collect();
+
+    doc.apply(Command::Reorder {
+        ids: vec!["rect".to_string()],
+        how: Reorder::Front,
+    });
+
+    assert_eq!(ids(&doc).last().unwrap(), "rect");
+    assert_indices_agree_with_order(&doc, "after sending rect to the front");
+
+    for (id, index, version) in &before {
+        let e = get(&doc, id);
+        if id == "rect" {
+            assert_ne!(&e.index, index, "the moved element kept its stale key");
+            assert_eq!(
+                e.version,
+                version + 1,
+                "`index` is a field; writing it carries the bookkeeping"
+            );
+        } else {
+            assert_eq!(&e.index, index, "{id} shifted position but did not move");
+            assert_eq!(e.version, *version, "{id} was not edited, so its version stands");
+        }
+    }
+}
+
+#[test]
+fn a_moved_block_is_reindexed_as_a_block() {
+    let mut doc = seed_doc();
+    doc.apply(Command::Reorder {
+        ids: vec!["scribble".to_string(), "diamond".to_string()],
+        how: Reorder::Back,
+    });
+    assert_eq!(&ids(&doc)[..2], &["scribble".to_string(), "diamond".to_string()]);
+    assert_indices_agree_with_order(&doc, "after sending two elements to the back");
+}
+
+#[test]
+fn undo_restores_the_previous_index_exactly() {
+    let mut doc = seed_doc();
+    let before: Vec<Option<String>> = doc.elements().iter().map(|e| e.index.clone()).collect();
+    doc.apply(Command::Reorder {
+        ids: vec!["rect".to_string(), "arrow".to_string()],
+        how: Reorder::Front,
+    });
+    doc.undo().unwrap();
+    let after: Vec<Option<String>> = doc.elements().iter().map(|e| e.index.clone()).collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn a_file_with_no_indices_at_all_keeps_working() {
+    // Older exports, and most files in the wild, have no `index` anywhere.
+    // Excalidraw backfills those from the array order on load, so the array
+    // alone is already right — we must not backfill the whole scene here, and
+    // we must not fall over.
+    let text = seed_json().replace("\"index\"", "\"wasIndex\"");
+    let mut doc = Doc::from_json(&text).unwrap();
+    assert!(doc.elements().iter().all(|e| e.index.is_none()));
+
+    doc.apply(Command::Reorder {
+        ids: vec!["rect".to_string()],
+        how: Reorder::Front,
+    });
+    assert_eq!(ids(&doc).last().unwrap(), "rect");
+
+    let indexed: Vec<&str> = doc
+        .elements()
+        .iter()
+        .filter_map(|e| e.index.as_deref())
+        .collect();
+    assert_eq!(
+        indexed.len(),
+        1,
+        "only the element that moved should have gained a key"
+    );
+    assert_indices_agree_with_order(&doc, "unindexed file after a reorder");
+}
+
+#[test]
+fn insert_keys_the_element_where_it_actually_lands() {
+    let mut doc = seed_doc();
+    let el = doc.new_element(ElementKind::Rectangle, &Bounds::new(0.0, 0.0, 10.0, 10.0));
+    assert!(
+        el.index.as_deref() > Some("a7"),
+        "a freshly drawn shape is keyed on top"
+    );
+
+    // Inserted in the middle instead, it must be keyed for where it went.
+    let id = el.id.clone();
+    doc.apply(Command::Insert {
+        at: Some(2),
+        element: Box::new(el),
+    });
+    assert_eq!(doc.index_of(&id), Some(2));
+    assert_indices_agree_with_order(&doc, "after inserting in the middle");
+
+    doc.undo().unwrap();
+    assert!(doc.index_of(&id).is_none());
+    assert_indices_agree_with_order(&doc, "after undoing the insert");
+}
+
+#[test]
+fn a_duplicate_does_not_inherit_the_original_index() {
+    // `ops.rs` duplicates by cloning an element and handing it to `Insert`.
+    // Two elements with one key is exactly the ambiguity the scheme exists to
+    // prevent, so `Insert` overwrites rather than filling in a blank.
+    let mut doc = seed_doc();
+    let mut copy = get(&doc, "rect").clone();
+    let (id, seed) = doc.fresh_identity();
+    copy.id = id.clone();
+    copy.seed = seed;
+    assert_eq!(copy.index.as_deref(), Some("a1"));
+
+    doc.apply(Command::Insert {
+        at: None,
+        element: Box::new(copy),
+    });
+    assert_ne!(get(&doc, &id).index.as_deref(), Some("a1"));
+    assert_indices_agree_with_order(&doc, "after duplicating");
 }
 
 #[test]
@@ -858,6 +1104,10 @@ fn fuzz_undo_restores_the_scene_exactly() {
             applied += 1;
         }
         assert!(applied > 0);
+        // The interop property, checked on the edited scene rather than only
+        // on the restored one: whatever the commands did, an element that
+        // carries an `index` still sorts after the last one that does.
+        assert_indices_agree_with_order(&doc, &format!("run {run} after editing"));
 
         undo_all(&mut doc);
         assert!(!doc.can_undo());

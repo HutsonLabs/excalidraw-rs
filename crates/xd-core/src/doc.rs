@@ -873,7 +873,10 @@ impl Doc {
         // relative to the others that stayed, so its key is still correct.
         let moved: Vec<String> = next
             .iter()
-            .filter(|id| prev.iter().position(|p| p == *id) != next.iter().position(|p| p == *id))
+            .filter(|id| {
+                ids.contains(id)
+                    && prev.iter().position(|p| p == *id) != next.iter().position(|p| p == *id)
+            })
             .cloned()
             .collect();
         out.push(Edit::Reordered { prev, next: next.clone() });
