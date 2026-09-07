@@ -1,0 +1,28 @@
+# The standalone app. PolyForm-Noncommercial, and the only crate in the
+# workspace that is: it may depend on the permissive `xd-*` crates, and nothing
+# permissive may ever depend on it (PLAN.md, Phase 0).
+[package]
+name = "excalidraw-rs"
+description = "A native .excalidraw editor."
+version.workspace = true
+edition.workspace = true
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[lib]
+name = "excalidraw_rs_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `devtools` keeps the webview inspector in release builds too. The frontend is
+# unbundled ES modules served straight off disk, so Inspect Element is the
+# actual debugger for this app.
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

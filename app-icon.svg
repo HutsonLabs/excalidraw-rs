@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The app mark: a hand-drawn box, an arrow, and a second box. The whole
+       point of the format is sketchy geometry, so the icon is drawn with the
+       wobble it renders with rather than with straight lines. -->
+  <rect width="1024" height="1024" rx="224" fill="#1e1e2e"/>
+  <g fill="none" stroke="#cdd6f4" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M188 274 L470 268 L474 452 L192 458 Z M186 280 L468 274"/>
+    <path d="M556 566 L838 560 L842 744 L560 750 Z M554 572 L836 566"/>
+  </g>
+  <g fill="none" stroke="#f5c2e7" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M470 462 C 540 520, 560 540, 640 574"/>
+    <path d="M600 542 L646 578 L594 596"/>
+  </g>
+</svg>

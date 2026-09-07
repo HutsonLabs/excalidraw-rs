@@ -1,0 +1,37 @@
+name: no-ai-attribution
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check-commit-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine commit range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "range=${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            echo "range=${{ github.event.before }}..${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "range=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reject AI attribution in commit messages and identities
+        run: scripts/check-no-ai-attribution.sh "${{ steps.range.outputs.range }}"
+
+      - name: Self-test the hooks
+        run: scripts/selftest-hooks.sh
+
+      - name: Verify the gates are present and executable
+        run: |
+          test -x .githooks/commit-msg
+          test -x .githooks/pre-push
+          test -x scripts/claude-scrub.sh
+          test -x .claude/hooks/guard-git-attribution.sh

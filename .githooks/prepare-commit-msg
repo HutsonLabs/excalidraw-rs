@@ -1,0 +1,7 @@
+#!/bin/sh
+# Strip AI-assistant attribution before the message is ever shown or stored.
+set -eu
+root=$(git rev-parse --show-toplevel)
+scrub="$root/scripts/claude-scrub.sh"
+[ -x "$scrub" ] || exit 0
+"$scrub" scrub-file "$1"

@@ -1,0 +1,11 @@
+#!/bin/sh
+# `git am` path — same treatment as a normal commit message.
+set -eu
+root=$(git rev-parse --show-toplevel)
+scrub="$root/scripts/claude-scrub.sh"
+[ -x "$scrub" ] || exit 0
+"$scrub" scrub-file "$1"
+"$scrub" check-file "$1" || {
+	echo "applypatch-msg: refusing to apply a patch that credits Claude." >&2
+	exit 1
+}

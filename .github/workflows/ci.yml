@@ -1,0 +1,50 @@
+# The gates PLAN.md asks for, in the order they fail fastest.
+#
+# The two JS guards are not decoration: the portable view's only consumer for
+# most of this project's life is an app with every incentive to reach into it,
+# and nothing will organically prove it is still host-independent until the
+# port lands (PLAN.md Phase 5). check-imports.mjs is that proof.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p xd-core
+      - run: cargo clippy -p xd-core -p xd-wasm --all-targets -- -D warnings
+      - run: scripts/check-licenses.sh
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+      # Builds and asserts the 586 KB budget. The number is the size of
+      # bpmn-js in term.hut, which is already dynamically imported there — so
+      # matching it means the WASM core is a precedent, not a regression.
+      - run: scripts/build-wasm.sh
+      # A vendored artifact that drifts from its source is worse than none:
+      # ui/ is served straight off disk, so what is committed is what ships.
+      - run: git diff --exit-code -- ui/vendor/xd-wasm || (echo "ui/vendor/xd-wasm is stale — run scripts/build-wasm.sh and commit it" && exit 1)
+
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test
+      - run: bun scripts/check-imports.mjs

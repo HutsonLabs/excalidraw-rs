@@ -1,0 +1,24 @@
+#!/bin/sh
+# Last line of defence: scrub again, then refuse the commit if anything survived.
+set -eu
+root=$(git rev-parse --show-toplevel)
+scrub="$root/scripts/claude-scrub.sh"
+[ -x "$scrub" ] || exit 0
+
+"$scrub" scrub-file "$1"
+
+rc=0
+"$scrub" check-file "$1" || rc=1
+
+name=$(git var GIT_AUTHOR_IDENT | sed 's/ <.*//')
+email=$(git var GIT_AUTHOR_IDENT | sed 's/.*<//; s/>.*//')
+"$scrub" check-identity "$name" "$email" "Author" || rc=1
+cname=$(git var GIT_COMMITTER_IDENT | sed 's/ <.*//')
+cemail=$(git var GIT_COMMITTER_IDENT | sed 's/.*<//; s/>.*//')
+"$scrub" check-identity "$cname" "$cemail" "Committer" || rc=1
+
+if [ $rc -ne 0 ]; then
+	echo "" >&2
+	echo "commit-msg: refusing to record AI attribution. Fix the message above and retry." >&2
+	exit 1
+fi

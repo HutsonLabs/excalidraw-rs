@@ -1,0 +1,194 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "box-source",
+      "type": "rectangle",
+      "x": 100,
+      "y": 100,
+      "width": 160,
+      "height": 90,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a0",
+      "roundness": {
+        "type": 3
+      },
+      "seed": 1044806567,
+      "version": 91,
+      "versionNonce": 462115959,
+      "isDeleted": false,
+      "boundElements": [
+        {
+          "id": "arrow-plain",
+          "type": "arrow"
+        },
+        {
+          "id": "arrow-elbow",
+          "type": "arrow"
+        }
+      ],
+      "updated": 1741267200000,
+      "link": null,
+      "locked": false
+    },
+    {
+      "id": "box-target",
+      "type": "ellipse",
+      "x": 520,
+      "y": 260,
+      "width": 160,
+      "height": 90,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "#b2f2bb",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a1",
+      "roundness": {
+        "type": 2
+      },
+      "seed": 1727302759,
+      "version": 77,
+      "versionNonce": 1195694295,
+      "isDeleted": false,
+      "boundElements": [
+        {
+          "id": "arrow-plain",
+          "type": "arrow"
+        },
+        {
+          "id": "arrow-elbow",
+          "type": "arrow"
+        }
+      ],
+      "updated": 1741267200001,
+      "link": null,
+      "locked": false
+    },
+    {
+      "id": "arrow-plain",
+      "type": "arrow",
+      "x": 266.5,
+      "y": 150.25,
+      "width": 247.5,
+      "height": 152.75,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a2",
+      "roundness": {
+        "type": 2
+      },
+      "seed": 1015826167,
+      "version": 214,
+      "versionNonce": 745140887,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1741267200002,
+      "link": null,
+      "locked": false,
+      "points": [
+        [0, 0],
+        [120.75, 61.5],
+        [247.5, 152.75]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": {
+        "elementId": "box-source",
+        "focus": 0.12599999999999997,
+        "gap": 6.5
+      },
+      "endBinding": {
+        "elementId": "box-target",
+        "focus": -0.31,
+        "gap": 4.75
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "elbowed": false
+    },
+    {
+      "id": "arrow-elbow",
+      "type": "arrow",
+      "x": 180,
+      "y": 196.5,
+      "width": 420,
+      "height": 63.5,
+      "angle": 0,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a3",
+      "roundness": null,
+      "seed": 349921689,
+      "version": 158,
+      "versionNonce": 1857442231,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1741267200003,
+      "link": null,
+      "locked": false,
+      "points": [
+        [0, 0],
+        [0, 40],
+        [420, 40],
+        [420, 63.5]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": {
+        "elementId": "box-source",
+        "focus": 0,
+        "gap": 6.5,
+        "fixedPoint": [0.5, 1]
+      },
+      "endBinding": {
+        "elementId": "box-target",
+        "focus": 0,
+        "gap": 4,
+        "fixedPoint": [0.5, 0]
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "elbowed": true,
+      "fixedSegments": [],
+      "startIsSpecial": false,
+      "endIsSpecial": false
+    }
+  ],
+  "appState": {
+    "gridSize": null,
+    "gridStep": 5,
+    "gridModeEnabled": false,
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

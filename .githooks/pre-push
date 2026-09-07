@@ -1,0 +1,28 @@
+#!/bin/sh
+# Nothing leaves this machine crediting an AI assistant.
+set -eu
+root=$(git rev-parse --show-toplevel)
+scrub="$root/scripts/claude-scrub.sh"
+[ -x "$scrub" ] || exit 0
+
+remote=${1:-origin}
+zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
+rc=0
+
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+	[ "$local_sha" = "$zero" ] && continue            # branch deletion
+	if [ "$remote_sha" = "$zero" ]; then
+		revs="$local_sha --not --remotes=$remote"
+	else
+		revs="$remote_sha..$local_sha"
+	fi
+	# shellcheck disable=SC2086
+	"$scrub" check-revs $revs || rc=1
+done
+
+[ $rc -eq 0 ] || {
+	echo "" >&2
+	echo "pre-push: blocked. Rewrite the offending commits, e.g." >&2
+	echo "  scripts/scrub-history.sh <upstream>..HEAD" >&2
+	exit 1
+}

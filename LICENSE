@@ -1,0 +1,31 @@
+# Licensing
+
+This repository ships two licences on purpose, and the split is part of the
+design rather than an accident of history (PLAN.md, Phase 0).
+
+## The crates — MIT OR Apache-2.0
+
+`crates/xd-core` and `crates/xd-wasm` are dual-licensed MIT OR Apache-2.0, at
+your option — the Rust norm, dual so that downstream picks. They are the
+`.excalidraw` document model: format, geometry, commands, undo. Nothing in them
+knows about this application, and nothing in them ever may.
+
+See `crates/xd-core/LICENSE-MIT` and `crates/xd-core/LICENSE-APACHE`.
+
+## The application — PolyForm Noncommercial 1.0.0
+
+`src-tauri/`, `ui/`, and everything in `ui/standalone/` are licensed under
+PolyForm Noncommercial 1.0.0, matching term.hut. See `LICENSE-POLYFORM`.
+
+## The rule between them
+
+The coupling runs one way only: **the PolyForm application may depend on the
+permissive crates; nothing permissive may depend on anything PolyForm.** That
+is already the layering the architecture wants, so it costs nothing — but it
+does mean `xd-core` can never grow an app-shaped dependency, and
+`scripts/check-licenses.sh` asserts it in CI.
+
+## Vendored code
+
+`ui/vendor/` carries third-party ES modules under their own licences, each with
+its LICENSE file alongside: Rough.js (MIT) and perfect-freehand (MIT).

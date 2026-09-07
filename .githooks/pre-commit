@@ -1,0 +1,19 @@
+#!/bin/sh
+# Catch a Claude identity before the message editor even opens.
+set -eu
+root=$(git rev-parse --show-toplevel)
+scrub="$root/scripts/claude-scrub.sh"
+[ -x "$scrub" ] || exit 0
+
+rc=0
+name=$(git var GIT_AUTHOR_IDENT | sed 's/ <.*//')
+email=$(git var GIT_AUTHOR_IDENT | sed 's/.*<//; s/>.*//')
+"$scrub" check-identity "$name" "$email" "Author" || rc=1
+cname=$(git var GIT_COMMITTER_IDENT | sed 's/ <.*//')
+cemail=$(git var GIT_COMMITTER_IDENT | sed 's/.*<//; s/>.*//')
+"$scrub" check-identity "$cname" "$cemail" "Committer" || rc=1
+
+[ $rc -eq 0 ] || {
+	echo "pre-commit: set a human author with 'git config user.name/user.email'." >&2
+	exit 1
+}

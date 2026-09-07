@@ -1,0 +1,17 @@
+[package]
+name = "xd-core"
+description = "The .excalidraw document model: format, geometry, commands, undo. No I/O, no wasm, no rendering."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["excalidraw", "diagram", "geometry", "editor"]
+categories = ["graphics", "data-structures"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+
+[dev-dependencies]
+proptest = "1"

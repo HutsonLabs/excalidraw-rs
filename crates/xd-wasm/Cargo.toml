@@ -1,0 +1,21 @@
+[package]
+name = "xd-wasm"
+description = "wasm-bindgen shim over xd-core. The only crate that knows JavaScript exists."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xd-core = { path = "../xd-core", version = "0.1.0" }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

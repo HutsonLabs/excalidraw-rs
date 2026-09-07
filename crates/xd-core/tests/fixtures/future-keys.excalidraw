@@ -1,0 +1,163 @@
+{
+  "type": "excalidraw",
+  "version": 3,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "carries-unknown-keys",
+      "type": "rectangle",
+      "x": 0,
+      "y": 0,
+      "width": 300,
+      "height": 180,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a0",
+      "roundness": {
+        "type": 3
+      },
+      "seed": 1801226903,
+      "version": 88,
+      "versionNonce": 1288896215,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1741267200000,
+      "link": null,
+      "locked": false,
+      "customData": {
+        "hut": {
+          "anchor": "src/main.rs:42",
+          "tags": ["design", "phase-1"],
+          "weight": 0.5,
+          "nested": {
+            "deeply": {
+              "enough": [1, [2, [3, null]]]
+            }
+          }
+        }
+      },
+      "elbowed": false,
+      "crop": null,
+      "someFutureNumber": 1.7976931348623157e308,
+      "someFutureNegativeZero": -0,
+      "someFutureBigInteger": 9007199254740991,
+      "someFutureEmptyArray": [],
+      "someFutureEmptyObject": {},
+      "someFutureUnicode": "café — naïve — 🎨 — \t\n — \\ — \"quoted\"",
+      "someFutureFalse": false
+    },
+    {
+      "id": "unknown-type-with-unknown-keys",
+      "type": "magicframe",
+      "x": 340,
+      "y": 0,
+      "width": 300,
+      "height": 180,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a1",
+      "roundness": null,
+      "seed": 1105091159,
+      "version": 3,
+      "versionNonce": 1633334999,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1741267200001,
+      "link": null,
+      "locked": false,
+      "name": "Wireframe to code",
+      "generationData": {
+        "status": "done",
+        "html": "<div>generated</div>",
+        "prompt": "a login form"
+      }
+    },
+    {
+      "id": "arrow-with-unknown-binding-keys",
+      "type": "arrow",
+      "x": 0,
+      "y": 240,
+      "width": 640,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "index": "a2",
+      "roundness": null,
+      "seed": 1489624151,
+      "version": 40,
+      "versionNonce": 1731184023,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1741267200002,
+      "link": null,
+      "locked": false,
+      "points": [
+        [0, 0],
+        [640, 0]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": {
+        "elementId": "carries-unknown-keys",
+        "focus": 0.25,
+        "gap": 4,
+        "fixedPoint": [1, 0.5],
+        "someFutureBindingKey": {
+          "mode": "sticky"
+        }
+      },
+      "endBinding": {
+        "elementId": "unknown-type-with-unknown-keys",
+        "focus": -0.125,
+        "gap": 4,
+        "fixedPoint": [0, 0.5]
+      },
+      "startArrowhead": "dot",
+      "endArrowhead": "triangle",
+      "elbowed": true,
+      "fixedSegments": [
+        {
+          "start": [0, 0],
+          "end": [320, 0],
+          "index": 1
+        }
+      ]
+    }
+  ],
+  "appState": {
+    "gridSize": null,
+    "viewBackgroundColor": "#ffffff",
+    "someFutureAppStateKey": {
+      "enabled": true,
+      "list": [1, 2, 3]
+    }
+  },
+  "files": {},
+  "someFutureTopLevelKey": {
+    "schema": 4,
+    "notes": ["kept", "verbatim"]
+  }
+}

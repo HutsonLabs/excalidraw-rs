@@ -1,0 +1,24 @@
+# excalidraw-rs — a Rust .excalidraw editor.
+#
+# Two licences live in this workspace on purpose (PLAN.md, Phase 0): the two
+# `crates/` are MIT OR Apache-2.0 so anyone may depend on them, and the Tauri
+# app in `src-tauri/` is PolyForm-Noncommercial-1.0.0. The dependency arrow
+# runs one way only — the app may use the crates; nothing in the crates may
+# ever reach back into the app. `scripts/check-licenses.sh` asserts it.
+[workspace]
+resolver = "2"
+members = ["crates/xd-core", "crates/xd-wasm", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/hutsonlabs/excalidraw-rs"
+
+[profile.release]
+# The WASM size budget is 586 KB (the bpmn-js precedent). These four settings
+# are what buys it; wasm-opt -Oz in scripts/build-wasm.sh finishes the job.
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true
