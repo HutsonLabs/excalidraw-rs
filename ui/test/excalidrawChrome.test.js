@@ -16,29 +16,13 @@ import {
   HANDLE_SIZE, ROTATE_OFFSET, HANDLES, chromeTheme, handlePositions,
   drawSelectionOutline, drawHandles, drawMarquee, drawSnapGuides,
 } from "../src/excalidrawView.js";
-
-/// A canvas context that records what it was told to do.
-function recorder() {
-  const calls = [];
-  // `calls` lives on the target, not assigned through the proxy afterwards —
-  // going through the setter would record the recorder's own wiring as the
-  // first call every context ever made.
-  const target = { lineWidth: 0, strokeStyle: "", fillStyle: "", calls };
-  return new Proxy(target, {
-    get(t, prop) {
-      if (prop in t) return t[prop];
-      return (...args) => calls.push([prop, ...args]);
-    },
-    set(t, prop, value) {
-      t[prop] = value;
-      calls.push([`set:${String(prop)}`, value]);
-      return true;
-    },
-  });
-}
+// The recording context is shared with contract.test.js and
+// excalidrawPaint.test.js. It used to live here; three copies of one fake had
+// already begun to disagree about what a canvas does.
+import { recorder, callsOf } from "./support/harness.js";
 
 const box = { minX: 100, minY: 50, maxX: 300, maxY: 150 };
-const of = (ctx, name) => ctx.calls.filter((c) => c[0] === name);
+const of = callsOf;
 
 // --- the constant-on-screen property ----------------------------------------
 

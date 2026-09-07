@@ -70,6 +70,7 @@ import {
   afterDraw, cursorFor, isPressureDevice, keyIntent, newToolState, passedThreshold,
   pointerIntent, pressureOf, toolLabel, wheelIntent, HIT_SLOP, MIN_DRAW_SIZE, ROTATE_SNAP,
 } from "./excalidrawTools.js";
+import { renderToolbar } from "./excalidrawToolbar.js";
 
 /// The same idle window as `bpmnView.js`, and the same one `xd-core` coalesces
 /// undo entries on. A pause long enough to end an undo step is a pause long
@@ -113,6 +114,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   const wrap = div("xd-wrap");
   const canvas = el("canvas", "xd-canvas");
   const panelHost = div("xd-props");
+  const toolbarHost = div("xd-toolbar");
   wrap.style.position = "relative";
   wrap.style.overflow = "hidden";
   wrap.style.touchAction = "none";
@@ -127,6 +129,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   // and the island measures against `wrap`, which is what it wants.
   wrap.appendChild(canvas);
   wrap.appendChild(panelHost);
+  wrap.appendChild(toolbarHost);
   // Focusable, or the keyboard — which is how tools are chosen — never
   // reaches us.
   wrap.tabIndex = 0;
@@ -184,6 +187,10 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   /// The properties panel, once it loads. Optional by construction — the
   /// editor works without it, which is what lets it be written in parallel.
   let panel = null;
+  /// The tool island. Statically imported and therefore always present: it is
+  /// the only way to change tools without a keyboard, so an editor that
+  /// degraded gracefully without it would be degrading to unusable.
+  let toolbar = null;
   /// `{ id, created }` while the text overlay is open.
   let editing = null;
 
@@ -359,13 +366,13 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   const publish = () => {
     if (detached) return;
     onActions?.([
-      { id: "xd-fit", icon: "fit", title: "Fit the drawing to the pane (⌘0)", run: fit },
-      { id: "xd-out", icon: "zoomOut", title: "Zoom out (⌘−)", run: () => zoomAt(1 / 1.2, ...centre()) },
+      { id: "xd-fit", icon: "fit", title: "Fit the drawing to the pane (⌘0)", run: act(fit) },
+      { id: "xd-out", icon: "zoomOut", title: "Zoom out (⌘−)", run: act(() => zoomAt(1 / 1.2, ...centre())) },
       { id: "xd-zoom", kind: "status", text: zoomText },
-      { id: "xd-in", icon: "zoomIn", title: "Zoom in (⌘+)", run: () => zoomAt(1.2, ...centre()) },
-      { id: "xd-one", label: "1:1", title: "Actual size", run: () => zoomAt(1 / camera.scale, ...centre()) },
-      { id: "xd-undo", label: "↶", title: "Undo (⌘Z)", run: () => history("undo"), disabled: !doc?.canUndo() },
-      { id: "xd-redo", label: "↷", title: "Redo (⌘⇧Z)", run: () => history("redo"), disabled: !doc?.canRedo() },
+      { id: "xd-in", icon: "zoomIn", title: "Zoom in (⌘+)", run: act(() => zoomAt(1.2, ...centre())) },
+      { id: "xd-one", label: "1:1", title: "Actual size", run: act(() => zoomAt(1 / camera.scale, ...centre())) },
+      { id: "xd-undo", label: "↶", title: "Undo (⌘Z)", run: act(() => history("undo")), disabled: !doc?.canUndo() },
+      { id: "xd-redo", label: "↷", title: "Redo (⌘⇧Z)", run: act(() => history("redo")), disabled: !doc?.canRedo() },
       // Which tool is live. With no toolbar of its own this readout is the
       // only thing that says a keystroke changed the tool, and a drawing app
       // whose next click does something unexpected is an infuriating one.
@@ -374,7 +381,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
         id: "xd-save",
         icon: "save",
         title: state === "editing" ? "Save now (⌘S)" : state === "saving" ? "Saving…" : "Saved",
-        run: saveNow,
+        run: act(saveNow),
         disabled: state !== "editing",
       },
       ...(error ? [{ id: "xd-error", kind: "status", text: error, tone: "err" }] : []),
@@ -475,6 +482,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   const toolChanged = () => {
     publish();
     panel?.refresh?.();
+    toolbar?.refresh();
     setCursor(cursorFor(tools, {}, !!gesture));
   };
 
@@ -574,8 +582,46 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
     if (wrap.style.cursor !== value) wrap.style.cursor = value;
   };
 
+  /// Give the canvas the keyboard back.
+  ///
+  /// Clipboard events are delivered to whatever is focused, so ⌘C only reaches
+  /// this view while the canvas holds focus — and every button click leaves
+  /// focus on the button that was clicked. So each control that acts on the
+  /// drawing and then has nothing more to say hands the keyboard back: the
+  /// pane header's buttons, and the tool island's.
+  ///
+  /// Never while the text overlay is open. The overlay owns the keyboard for
+  /// as long as it exists, and taking focus off it fires its blur handler,
+  /// which commits the edit — so a stray call here would end a text edit the
+  /// user was in the middle of.
+  ///
+  /// The properties panel is deliberately not in this list: its controls are a
+  /// sequence someone may be tabbing through, and yanking focus out of a swatch
+  /// row after every click would make it unusable from the keyboard.
+  const takeFocus = () => {
+    if (detached || editing) return;
+    wrap.focus?.();
+  };
+
+  /// A header action: do the thing, then hand the keyboard back.
+  const act = (fn) => () => {
+    fn();
+    takeFocus();
+  };
+
+  /// True when an event is the canvas's own rather than one that bubbled up
+  /// from a piece of chrome sitting on top of it.
+  ///
+  /// The tool island and the properties panel are children of `wrap`, which is
+  /// where the pointer, wheel and double-click listeners live — so without
+  /// this, clicking a tool button also starts a marquee behind it and
+  /// scrolling the properties panel zooms the drawing. Checking the target
+  /// rather than calling `stopPropagation` in the islands keeps the rule in
+  /// one place instead of in every module that ever floats over the canvas.
+  const onCanvas = (ev) => !ev?.target || ev.target === canvas;
+
   const onPointerDown = (ev) => {
-    if (detached || !doc) return;
+    if (detached || !doc || !onCanvas(ev)) return;
     // A click anywhere on the canvas is the end of a text edit. Committing
     // before the hit test matters: the commit resizes the element, and a
     // pointerdown that tested against its old box would select the wrong
@@ -764,7 +810,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   };
 
   const onWheel = (ev) => {
-    if (detached) return;
+    if (detached || !onCanvas(ev)) return;
     ev.preventDefault?.();
     const intent = wheelIntent(ev);
     if (intent.kind === "zoom") {
@@ -779,7 +825,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   };
 
   const onDoubleClick = (ev) => {
-    if (detached || !doc) return;
+    if (detached || !doc || !onCanvas(ev)) return;
     ev.preventDefault?.();
     const [x, y] = scenePoint(ev);
     const hit = doc.hitTest(x, y, HIT_SLOP / camera.scale);
@@ -818,7 +864,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
         break;
       case "lock":
         tools.locked = !tools.locked;
-        publish();
+        toolChanged();
         break;
       case "escape":
         doc.clearSelection();
@@ -1081,9 +1127,14 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   ///
   /// The element joins the document first and is typed into second, which is
   /// the same shape as a dragged-out rectangle: there is no half-existing
-  /// thing for the painter or for undo to know about. `endDraft(0)` is what
-  /// keeps it — the usual minimum size would throw away a text element that is
-  /// zero by zero because nothing has been typed yet.
+  /// thing for the painter or for undo to know about.
+  ///
+  /// The zero passed to `endDraft` is the minimum size a draft has to reach to
+  /// survive, and a text element that nothing has been typed into yet has no
+  /// size at all. The core keeps text out of that check on its own; asking for
+  /// zero as well costs nothing and says here, at the call site, that a
+  /// zero-by-zero text element is intended rather than an oversight. Deleting
+  /// an empty one is `closeOverlay`'s job, where the user's intent is known.
   function createText(x, y) {
     if (!doc) return;
     const lh = (style.fontSize ?? 20) * 1.25;
@@ -1219,7 +1270,29 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   });
   ro?.observe(wrap);
 
+  toolbar = renderToolbar(toolbarHost, {
+    getTool: () => tools.tool,
+    setTool: (id) => {
+      tools.tool = id;
+      toolChanged();
+      // Or the keyboard stays on the button that was just clicked, and the
+      // next shortcut — and the next ⌘C — goes nowhere.
+      takeFocus();
+    },
+    getLocked: () => tools.locked,
+    setLocked: (value) => {
+      tools.locked = value;
+      toolChanged();
+      takeFocus();
+    },
+  });
+
   publish();
+  // The canvas takes the keyboard on mount so the first ⌘C, ⌘A or R works
+  // without the user having to click the drawing first. It is the only thing
+  // in the host that wants the keyboard by default; a host that disagrees can
+  // focus something else immediately after, and this will not take it back.
+  takeFocus();
 
   // --- opening -------------------------------------------------------------
   //
@@ -1277,6 +1350,8 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
     overlay.remove();
     panel?.dispose?.();
     panel = null;
+    toolbar?.dispose();
+    toolbar = null;
     // The decoded images are held only by this map and were never in the
     // document, and their sources are data: URLs, so there is no fetch left in
     // flight to abort.

@@ -1,0 +1,108 @@
+/* The tool island (excalidrawToolbar.js).
+ *
+ * Beside the module rather than in the app's stylesheet, for the same reason
+ * excalidrawProps.css is: at PLAN.md Phase 8 this is lifted into term.hut as a
+ * copy of two files, and a block merged into styles.css would be a diff
+ * against a stylesheet term.hut already owns.
+ *
+ * Every colour is a token, never a literal — --panel/--surface, --fg/--text,
+ * --border, --subtext and --accent all exist on both sides of the port, so the
+ * island arrives already wearing its host's colours.
+ */
+
+/* Top centre, against the nearest positioned ancestor, which is the view's own
+ * .xd-wrap. That leaves the top-left corner to the properties island and the
+ * pane header above to the host — three pieces of chrome that never overlap
+ * because each has a corner of its own.
+ *
+ * z-index sits one above the properties island so that on a pane narrow enough
+ * for the two to meet, the tools stay reachable: the panel edits what you have
+ * already drawn, and the island is how you draw anything at all. */
+.xdt-island {
+  position: absolute;
+  z-index: 5;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.25rem;
+  /* Never wider than the canvas. A pane too narrow for nine tools scrolls
+     rather than pushing the last of them off where nothing can reach it. */
+  max-width: calc(100% - 1.5rem);
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+
+  background: var(--panel, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  box-shadow: 0 0.25rem 1rem hsla(0, 0%, 0%, 0.28);
+  font-family: var(--font-ui);
+}
+
+.xdt-btn {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0.375rem;
+  color: var(--subtext);
+  cursor: pointer;
+}
+
+.xdt-btn svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  display: block;
+}
+
+.xdt-btn:hover { background: var(--bg-alt, var(--bg)); color: var(--fg, var(--text)); }
+
+/* The active tool is filled, not merely tinted. This is the single piece of
+ * state on screen that says what the next click will do, and a subtle
+ * indication of it is a drawing app that surprises you. */
+.xdt-btn.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.xdt-btn:focus-visible {
+  outline: 0.125rem solid var(--accent);
+  outline-offset: -0.125rem;
+}
+
+/* The shortcut numeral, in the corner Excalidraw prints it in. Deliberately
+ * faint and deliberately not hidden: it is how the keyboard gets learned, and
+ * a hint you have to hover to see is a hint nobody reads. */
+.xdt-key {
+  position: absolute;
+  right: 0.1875rem;
+  bottom: 0.0625rem;
+  font-size: 0.5625rem;
+  line-height: 1;
+  color: var(--subtext);
+  pointer-events: none;
+}
+
+.xdt-btn.on .xdt-key { color: var(--accent); }
+
+.xdt-sep {
+  flex: none;
+  width: 1px;
+  height: 1.25rem;
+  margin: 0 0.25rem;
+  background: var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xdt-btn { transition: none; }
+}

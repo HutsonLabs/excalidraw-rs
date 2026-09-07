@@ -31,140 +31,17 @@
 // was the original point of the file.
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
+import {
+  FakeNode, installDom, uninstallDom, frameCount, observerCount, leakedListeners,
+} from "./support/harness.js";
 // One WASM instance for the whole run — see the harness for why it must be
 // exactly one, and why no test may call the module's own init.
 import { openDoc as openReal } from "./wasmHarness.js";
+import { TOOLS } from "../src/excalidrawTools.js";
 
-// --- a DOM, to the extent this needs one -------------------------------------
-
-/// Every add/remove of a listener, anywhere, in one tally. A view that removed
-/// nine of its ten listeners fails this, and so does one that removed a
-/// listener it never added.
-const ledger = new Map(); // `${tag}:${type}` -> net count
-const tally = (node, type, delta) => {
-  const k = `${node.tagName ?? "window"}:${type}`;
-  ledger.set(k, (ledger.get(k) ?? 0) + delta);
-};
-
-class FakeNode {
-  constructor(tag) {
-    this.tagName = String(tag).toUpperCase();
-    this.children = [];
-    this.parentNode = null;
-    this.style = {};
-    this.dataset = {};
-    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
-    this.handlers = new Map(); // type -> Set(fn)
-    // No layout. A detached host has none in a real browser either, and it is
-    // what keeps `fit()` — and therefore every coordinate in this file —
-    // deterministic; see PAD below.
-    this.clientWidth = 0;
-    this.clientHeight = 0;
-    this.value = "";
-    this.textContent = "";
-  }
-
-  addEventListener(type, fn) {
-    tally(this, type, 1);
-    if (!this.handlers.has(type)) this.handlers.set(type, new Set());
-    this.handlers.get(type).add(fn);
-  }
-
-  removeEventListener(type, fn) {
-    tally(this, type, -1);
-    this.handlers.get(type)?.delete(fn);
-  }
-
-  appendChild(child) {
-    child.parentNode?.removeChild(child);
-    child.parentNode = this;
-    this.children.push(child);
-    return child;
-  }
-
-  removeChild(child) {
-    this.children = this.children.filter((c) => c !== child);
-    if (child.parentNode === this) child.parentNode = null;
-    return child;
-  }
-
-  remove() {
-    this.parentNode?.removeChild(this);
-  }
-
-  /// Deliver an event to whatever is listening, with the two methods every
-  /// handler in the view calls on it.
-  dispatch(type, ev = {}) {
-    const list = [...(this.handlers.get(type) ?? [])];
-    const event = { type, preventDefault() {}, stopPropagation() {}, ...ev };
-    for (const fn of list) fn(event);
-    return event;
-  }
-
-  getBoundingClientRect() {
-    return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight };
-  }
-
-  // The handful of element methods the view pokes. All no-ops: none of them
-  // decides anything, and a stub that did something would be inventing
-  // behaviour to then assert.
-  focus() {}
-  blur() {}
-  select() {}
-  setSelectionRange() {}
-  setPointerCapture() {}
-  releasePointerCapture() {}
-  setAttribute(name, value) { this[name] = value; }
-  getAttribute(name) { return this[name]; }
-  querySelectorAll() { return []; }
-  /// No 2D context. The view checks for one before measuring text and bails
-  /// out of `paint` before ever asking for it, which is the honest headless
-  /// answer — a stub context would be a canvas that silently drew nothing.
-  getContext() { return null; }
-}
-
-let frames = new Set();
-let observers = 0;
-
-class FakeResizeObserver {
-  constructor() { observers++; }
-  observe() {}
-  disconnect() { observers--; }
-}
-
-const installDom = () => {
-  ledger.clear();
-  frames = new Set();
-  observers = 0;
-  let seq = 0;
-  globalThis.document = {
-    createElement: (tag) => new FakeNode(tag),
-    head: new FakeNode("head"),
-    body: new FakeNode("body"),
-    querySelectorAll: () => [],
-  };
-  const win = new FakeNode("window");
-  win.devicePixelRatio = 1;
-  globalThis.window = win;
-  globalThis.ResizeObserver = FakeResizeObserver;
-  // Queued and never run. The view must still cancel it, and cancelling
-  // something that already fired would prove nothing.
-  globalThis.requestAnimationFrame = () => {
-    const id = ++seq;
-    frames.add(id);
-    return id;
-  };
-  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
-};
-
-const uninstallDom = () => {
-  delete globalThis.document;
-  delete globalThis.window;
-  delete globalThis.ResizeObserver;
-  delete globalThis.requestAnimationFrame;
-  delete globalThis.cancelAnimationFrame;
-};
-
+// The DOM stand-in and the listener tally live in ui/test/support/harness.js,
+// shared with the chrome and paint suites — there were three of these and they
+// had already started to disagree.
 // --- a document, to the extent this needs one --------------------------------
 
 const RECT = {
@@ -447,6 +324,10 @@ const type = (wrap, key, extra = {}) =>
   wrap.dispatch("keydown", { key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...extra });
 
 beforeEach(() => {
+  // Zero-sized on purpose: an unlaid-out pane makes `fitTransform` degenerate
+  // to 1:1 with its padding as the whole offset, which is what PAD above
+  // depends on. The paint loop is exercised in excalidrawPaint.test.js, where
+  // the host has a size and the canvas has a recording context.
   installDom();
   live = null;
 });
@@ -491,9 +372,7 @@ test("the view mounts, edits, saves, and disposes clean", async () => {
 
   // Every listener the view added, it removed. A non-zero count is a listener
   // firing into a torn-down view — the exact bug this file exists for.
-  for (const [where, count] of ledger) {
-    expect([where, count]).toEqual([where, 0]);
-  }
+  expect(leakedListeners()).toEqual([]);
   // And it left the host as it found it, so the pane can put something else
   // there without clearing up after it.
   expect(host.children).toHaveLength(0);
@@ -502,8 +381,8 @@ test("the view mounts, edits, saves, and disposes clean", async () => {
   // above: it is the real module here, not a stub, so a view that forgot to
   // call its dispose() leaves its listeners behind and the counts do not
   // balance.
-  expect(observers).toBe(0);
-  expect(frames.size).toBe(0);
+  expect(observerCount()).toBe(0);
+  expect(frameCount()).toBe(0);
 });
 
 test("dispose is idempotent — a pane may tear down twice", async () => {
@@ -512,7 +391,7 @@ test("dispose is idempotent — a pane may tear down twice", async () => {
   const { dispose } = await mount();
   dispose();
   expect(() => dispose()).not.toThrow();
-  for (const [, count] of ledger) expect(count).toBe(0);
+  expect(leakedListeners()).toEqual([]);
 });
 
 test("a pending autosave is flushed by dispose, not dropped", async () => {
@@ -737,6 +616,97 @@ test("undo and redo are disabled until there is something to undo", async () => 
   move(wrap, 50, 60);
   lift(wrap, 50, 60);
   expect(actions().find((a) => a.id === "xd-undo").disabled).toBe(false);
+});
+
+// --- the tool island ---------------------------------------------------------
+//
+// The editor was, for a while, unusable without knowing nine keyboard
+// shortcuts: every tool was reachable only by key, and a mouse-only user could
+// not leave select. These pin the way out of that.
+
+const islandOf = (wrap) =>
+  wrap.children.find((c) => c.className === "xd-toolbar")?.children[0];
+
+const buttonFor = (wrap, name) =>
+  islandOf(wrap).children.find((c) => String(c.title ?? "").startsWith(name));
+
+const activeTool = (actions) => actions().find((a) => a.id === "xd-tool")?.text;
+
+test("the tool island mounts with a button for every tool", async () => {
+  const { wrap, dispose } = await mount();
+  const island = islandOf(wrap);
+  expect(island).toBeDefined();
+
+  // One per tool, plus the lock. Read off `TOOLS` rather than hard-coded, so a
+  // tool added to the state machine and forgotten in the island fails here
+  // instead of being merely unreachable.
+  const buttons = island.children.filter((c) => c.tagName === "BUTTON");
+  expect(buttons).toHaveLength(TOOLS.length + 1);
+
+  // Every one of them says what it is and what its shortcut is — the island's
+  // real job is not the clicking, it is that the keyboard becomes learnable.
+  for (const tool of TOOLS) {
+    const b = buttonFor(wrap, tool.label);
+    expect(b).toBeDefined();
+    expect(b.title).toContain(tool.key.toUpperCase());
+    expect(b["aria-label"]).toBe(b.title);
+  }
+  expect(buttonFor(wrap, "Keep the selected tool")).toBeDefined();
+  dispose();
+});
+
+test("clicking a tool selects it, and the keyboard still does too", async () => {
+  const { wrap, actions, dispose } = await mount();
+  expect(activeTool(actions)).toBe("Select");
+
+  buttonFor(wrap, "Rectangle").dispatch("click", {});
+  expect(activeTool(actions)).toBe("Rectangle");
+
+  // The island is an addition, not a replacement.
+  type(wrap, "o");
+  expect(activeTool(actions)).toBe("Ellipse");
+  dispose();
+});
+
+test("a tool picked with the mouse actually draws", async () => {
+  // The whole complaint, end to end: open the app, click the rectangle, drag.
+  const { wrap, dispose } = await mount();
+  const before = live.length;
+  buttonFor(wrap, "Rectangle").dispatch("click", {});
+  press(wrap, 200, 200);
+  move(wrap, 260, 240);
+  lift(wrap, 260, 240);
+  expect(live.length).toBe(before + 1);
+  expect(live.element(live.length - 1).type).toBe("rectangle");
+  dispose();
+});
+
+test("the lock button keeps the tool after a draw", async () => {
+  const { wrap, actions, dispose } = await mount();
+  buttonFor(wrap, "Rectangle").dispatch("click", {});
+  buttonFor(wrap, "Keep the selected tool").dispatch("click", {});
+  expect(activeTool(actions)).toBe("Rectangle (locked)");
+
+  press(wrap, 200, 200);
+  move(wrap, 260, 240);
+  lift(wrap, 260, 240);
+  expect(activeTool(actions)).toBe("Rectangle (locked)");
+  dispose();
+});
+
+test("a click on the chrome does not reach the canvas behind it", async () => {
+  // The islands are children of the same element the pointer listeners are on,
+  // so without a target check, clicking a tool button also starts a marquee
+  // behind it — and releasing it clears the selection the user just made.
+  const { wrap, dispose } = await mount();
+  type(wrap, "a", { metaKey: true });
+  expect(live.selection).toHaveLength(1);
+
+  const button = buttonFor(wrap, "Ellipse");
+  wrap.dispatch("pointerdown", { pointerId: 1, button: 0, target: button, clientX: 40, clientY: 40 });
+  wrap.dispatch("pointerup", { pointerId: 1, target: button, clientX: 40, clientY: 40 });
+  expect(live.selection).toHaveLength(1);
+  dispose();
 });
 
 // --- and again, against the real document model ------------------------------
@@ -975,8 +945,8 @@ test("real core: the view disposes clean with a real document behind it", async 
   lift(wrap, 50, 60);
   dispose();
   await settle();
-  for (const [where, count] of ledger) expect([where, count]).toEqual([where, 0]);
+  expect(leakedListeners()).toEqual([]);
   expect(host.children).toHaveLength(0);
-  expect(observers).toBe(0);
-  expect(frames.size).toBe(0);
+  expect(observerCount()).toBe(0);
+  expect(frameCount()).toBe(0);
 });
