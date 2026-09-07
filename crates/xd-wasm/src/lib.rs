@@ -163,6 +163,26 @@ impl XdDoc {
             .map(|b| b.to_array().to_vec())
     }
 
+    /// The scale and offset that fit the whole drawing into a viewport, as
+    /// `[scale, offsetX, offsetY]`.
+    ///
+    /// Exposed even though `excalidrawScene.js` still has its own copy,
+    /// because that duplication is the "two painters, one truth" risk PLAN.md
+    /// names — and a differential test can only pin the two against each other
+    /// if both are reachable from the same place.
+    #[wasm_bindgen(js_name = fitTransform)]
+    pub fn fit_transform(&self, vw: f64, vh: f64, padding: f64) -> Vec<f64> {
+        let bounds = geometry::scene_bounds(self.doc.elements());
+        let t = geometry::fit_transform(bounds.as_ref(), vw, vh, padding);
+        vec![t.scale, t.offset_x, t.offset_y]
+    }
+
+    /// The corner radius Excalidraw would round this element's corners by.
+    #[wasm_bindgen(js_name = cornerRadius)]
+    pub fn corner_radius(&self, index: usize) -> f64 {
+        self.doc.elements().get(index).map(geometry::corner_radius).unwrap_or(0.0)
+    }
+
     #[wasm_bindgen(js_name = sceneBounds)]
     pub fn scene_bounds(&self) -> Option<Vec<f64>> {
         geometry::scene_bounds(self.doc.elements()).map(|b| b.to_array().to_vec())

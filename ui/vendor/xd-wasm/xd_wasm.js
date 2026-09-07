@@ -181,6 +181,15 @@ export class XdDoc {
         wasm.xddoc_clearSelection(this.__wbg_ptr);
     }
     /**
+     * The corner radius Excalidraw would round this element's corners by.
+     * @param {number} index
+     * @returns {number}
+     */
+    cornerRadius(index) {
+        const ret = wasm.xddoc_cornerRadius(this.__wbg_ptr, index);
+        return ret;
+    }
+    /**
      * @returns {Change}
      */
     deleteSelection() {
@@ -312,6 +321,32 @@ export class XdDoc {
     files() {
         const ret = wasm.xddoc_files(this.__wbg_ptr);
         return takeObject(ret);
+    }
+    /**
+     * The scale and offset that fit the whole drawing into a viewport, as
+     * `[scale, offsetX, offsetY]`.
+     *
+     * Exposed even though `excalidrawScene.js` still has its own copy,
+     * because that duplication is the "two painters, one truth" risk PLAN.md
+     * names — and a differential test can only pin the two against each other
+     * if both are reachable from the same place.
+     * @param {number} vw
+     * @param {number} vh
+     * @param {number} padding
+     * @returns {Float64Array}
+     */
+    fitTransform(vw, vh, padding) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.xddoc_fitTransform(retptr, this.__wbg_ptr, vw, vh, padding);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v1 = getArrayF64FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 8, 8);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * @returns {Change}

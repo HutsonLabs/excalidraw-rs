@@ -108,6 +108,12 @@ export function wrap(inner) {
     elementId: (i) => inner.elementId(i),
     elementBounds: (i) => boundsOf(inner.elementBounds(i)),
     sceneBounds: () => boundsOf(inner.sceneBounds()),
+    /// `{ scale, offsetX, offsetY }` fitting the drawing into a viewport.
+    fitTransform: (width, height, padding = 32) => {
+      const [scale, offsetX, offsetY] = inner.fitTransform(width, height, padding);
+      return { scale, offsetX, offsetY };
+    },
+    cornerRadius: (i) => inner.cornerRadius(i),
     appState: () => inner.appState(),
     files: () => inner.files(),
     toJson: () => inner.toJson(),
