@@ -13,7 +13,8 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::command::Command;
+use crate::binding;
+use crate::command::{Command, End};
 use crate::doc::Doc;
 use crate::geometry::{self, Bounds, Handle};
 use crate::scene::{Element, ElementKind};
@@ -212,4 +213,124 @@ fn run(doc: &mut Doc, cmd: Command, key: Option<&str>) -> crate::doc::Change {
         Some(k) => doc.apply_keyed(cmd, k, doc.now()),
         None => doc.apply(cmd),
     }
+}
+
+// --- arrow binding ----------------------------------------------------------
+
+/// Re-aim every arrow bound to any of `ids` (and every arrow *in* `ids`) at the
+/// shape it is bound to.
+///
+/// This is what makes binding worth having: dragging a shape has to move the
+/// arrows that point at it, in the same undo entry as the drag, or the diagram
+/// comes apart in the user's hands. It is called after a move, a resize and a
+/// rotate — anything that changes where a bound shape's outline is.
+pub fn reflow_bindings(doc: &mut Doc, ids: &[String], key: Option<&str>) -> crate::doc::Change {
+    let mut arrows: Vec<String> = Vec::new();
+    for e in doc.elements() {
+        if !e.kind.is_linear() {
+            continue;
+        }
+        let touches = |b: &Option<crate::scene::Binding>| {
+            b.as_ref().is_some_and(|b| ids.contains(&b.element_id))
+        };
+        if ids.contains(&e.id) || touches(&e.start_binding) || touches(&e.end_binding) {
+            arrows.push(e.id.clone());
+        }
+    }
+
+    let mut cmds = Vec::new();
+    for arrow_id in arrows {
+        if let Some(cmd) = reflow_one(doc, &arrow_id) {
+            cmds.push(cmd);
+        }
+    }
+    run(doc, Command::Batch(cmds), key)
+}
+
+/// The patch that re-aims one arrow, or `None` when it is unbound or has no
+/// two points to aim.
+fn reflow_one(doc: &Doc, arrow_id: &str) -> Option<Command> {
+    let arrow = doc.index_of(arrow_id).map(|i| &doc.elements()[i])?;
+    let points = arrow.points.as_ref()?;
+    if points.len() < 2 {
+        return None;
+    }
+    if arrow.start_binding.is_none() && arrow.end_binding.is_none() {
+        return None;
+    }
+
+    // Work in absolute coordinates; the file stores points relative to the
+    // element's own x/y, and moving an endpoint moves that origin too.
+    let mut abs: Vec<[f64; 2]> =
+        points.iter().map(|p| [arrow.x + p[0], arrow.y + p[1]]).collect();
+    let last = abs.len() - 1;
+
+    if let Some(b) = &arrow.start_binding {
+        if let Some(shape) = doc.index_of(&b.element_id).map(|i| &doc.elements()[i]) {
+            let from = (abs[1][0], abs[1][1]);
+            let (x, y) = binding::binding_point(shape, from, b.focus, b.gap);
+            abs[0] = [x, y];
+        }
+    }
+    if let Some(b) = &arrow.end_binding {
+        if let Some(shape) = doc.index_of(&b.element_id).map(|i| &doc.elements()[i]) {
+            let from = (abs[last - 1][0], abs[last - 1][1]);
+            let (x, y) = binding::binding_point(shape, from, b.focus, b.gap);
+            abs[last] = [x, y];
+        }
+    }
+
+    let (ox, oy) = (abs[0][0], abs[0][1]);
+    let rel: Vec<[f64; 2]> = abs.iter().map(|p| [p[0] - ox, p[1] - oy]).collect();
+    let (mut w, mut h) = (0.0f64, 0.0f64);
+    for p in &rel {
+        w = w.max(p[0].abs());
+        h = h.max(p[1].abs());
+    }
+    Some(Command::Patch {
+        id: arrow_id.to_string(),
+        fields: fields(&[
+            ("x", json!(ox)),
+            ("y", json!(oy)),
+            ("points", json!(rel)),
+            ("width", json!(w)),
+            ("height", json!(h)),
+        ]),
+    })
+}
+
+/// Bind one end of an arrow to whatever bindable shape sits under that end,
+/// or clear the binding when there is nothing there.
+///
+/// Returns the change and whether a binding now exists, so a caller can show
+/// the highlight Excalidraw shows while you drag an endpoint over a shape.
+pub fn rebind_end(doc: &mut Doc, arrow_id: &str, at_end: bool) -> (crate::doc::Change, bool) {
+    let Some(i) = doc.index_of(arrow_id) else { return (doc.no_change(), false) };
+    let arrow = &doc.elements()[i];
+    let Some(points) = arrow.points.clone() else { return (doc.no_change(), false) };
+    if points.len() < 2 {
+        return (doc.no_change(), false);
+    }
+    let idx = if at_end { points.len() - 1 } else { 0 };
+    let other = if at_end { points.len() - 2 } else { 1 };
+    let tip = (arrow.x + points[idx][0], arrow.y + points[idx][1]);
+    let from = (arrow.x + points[other][0], arrow.y + points[other][1]);
+
+    let target = binding::bindable_at(doc.elements(), tip.0, tip.1, arrow_id)
+        .map(|j| doc.elements()[j].clone());
+
+    let end = if at_end { End::End } else { End::Start };
+    let binding = target.as_ref().map(|shape| crate::scene::Binding {
+        element_id: shape.id.clone(),
+        focus: binding::focus_for(shape, from, tip),
+        gap: binding::DEFAULT_GAP,
+        rest: Map::new(),
+    });
+    let bound = binding.is_some();
+    let change = doc.apply(Command::Bind { arrow: arrow_id.to_string(), end, binding });
+    if bound {
+        let ids = vec![arrow_id.to_string()];
+        return (reflow_bindings(doc, &ids, None), true);
+    }
+    (change, false)
 }

@@ -154,6 +154,11 @@ export function wrap(inner) {
     ungroup: () => invalidate(inner.ungroup()),
     bind: (arrow, atEnd, target, focus, gap) =>
       invalidate(inner.bind(arrow, !!atEnd, target ?? "", focus, gap)),
+    /// The shape an arrow endpoint here would bind to, or -1 — what the
+    /// binding highlight is drawn around while an endpoint is being dragged.
+    bindableAt: (x, y, skip = "") => inner.bindableAt(x, y, skip),
+    rebindEnd: (arrow, atEnd) => invalidate(inner.rebindEnd(arrow, !!atEnd)),
+    isBound: (arrow, atEnd) => inner.isBound(arrow, !!atEnd),
 
     // --- history ---
     canUndo: () => inner.canUndo(),

@@ -142,6 +142,21 @@ export class XdDoc {
         return Change.__wrap(ret);
     }
     /**
+     * The shape an arrow endpoint at this point would bind to, or -1. The
+     * editor draws Excalidraw's highlight around it while an endpoint is
+     * being dragged, so the binding is visible before it is committed.
+     * @param {number} x
+     * @param {number} y
+     * @param {string} skip
+     * @returns {number}
+     */
+    bindableAt(x, y, skip) {
+        const ptr0 = passStringToWasm0(skip, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_bindableAt(this.__wbg_ptr, x, y, ptr0, len0);
+        return ret;
+    }
+    /**
      * @returns {XdDoc}
      */
     static blank() {
@@ -373,6 +388,20 @@ export class XdDoc {
         }
     }
     /**
+     * Whether that end is bound now. Separate from `rebindEnd` because
+     * wasm-bindgen has no tuple, and the editor wants the flag for its
+     * highlight rather than for its model.
+     * @param {string} arrow
+     * @param {boolean} at_end
+     * @returns {boolean}
+     */
+    isBound(arrow, at_end) {
+        const ptr0 = passStringToWasm0(arrow, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_isBound(this.__wbg_ptr, ptr0, len0, at_end);
+        return ret !== 0;
+    }
+    /**
      * @returns {number}
      */
     get length() {
@@ -435,6 +464,19 @@ export class XdDoc {
         const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.xddoc_patch(this.__wbg_ptr, ptr0, len0, addHeapObject(fields));
+        return Change.__wrap(ret);
+    }
+    /**
+     * Bind one end of an arrow to whatever is under it, or clear the binding
+     * when there is nothing there, and re-aim the arrow either way.
+     * @param {string} arrow
+     * @param {boolean} at_end
+     * @returns {Change}
+     */
+    rebindEnd(arrow, at_end) {
+        const ptr0 = passStringToWasm0(arrow, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_rebindEnd(this.__wbg_ptr, ptr0, len0, at_end);
         return Change.__wrap(ret);
     }
     /**

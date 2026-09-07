@@ -287,7 +287,8 @@ impl XdDoc {
     /// Drag the selection. `key` groups the whole drag into one undo entry.
     #[wasm_bindgen(js_name = dragBy)]
     pub fn drag_by(&mut self, dx: f64, dy: f64, key: &str) -> Change {
-        ops::translate(&mut self.doc, &self.selection, dx, dy, some(key)).into()
+        let change = ops::translate(&mut self.doc, &self.selection, dx, dy, some(key));
+        self.with_reflow(change, key)
     }
 
     #[wasm_bindgen(js_name = resizeTo)]
@@ -301,7 +302,7 @@ impl XdDoc {
         key: &str,
     ) -> Change {
         let Some(handle) = Handle::from_u32(handle) else { return self.doc.no_change().into() };
-        ops::resize(
+        let change = ops::resize(
             &mut self.doc,
             &self.selection,
             handle,
@@ -310,13 +311,14 @@ impl XdDoc {
             lock_aspect,
             from_center,
             some(key),
-        )
-        .into()
+        );
+        self.with_reflow(change, key)
     }
 
     #[wasm_bindgen(js_name = rotateTo)]
     pub fn rotate_to(&mut self, px: f64, py: f64, snap: f64, key: &str) -> Change {
-        ops::rotate(&mut self.doc, &self.selection, px, py, snap, some(key)).into()
+        let change = ops::rotate(&mut self.doc, &self.selection, px, py, snap, some(key));
+        self.with_reflow(change, key)
     }
 
     /// Start dragging out a new shape. The element joins the document
@@ -408,6 +410,16 @@ impl XdDoc {
             self.selection.clear();
             return self.doc.apply(Command::Delete { ids: vec![id] }).into();
         }
+        // An arrow drawn from one shape to another binds to both, the moment
+        // it is finished. Excalidraw does this and people rely on it without
+        // knowing it has a name — an arrow you have to explicitly attach is an
+        // arrow that will be left unattached.
+        if e.kind.is_linear() {
+            let (a, _) = ops::rebind_end(&mut self.doc, &id, false);
+            let (b, _) = ops::rebind_end(&mut self.doc, &id, true);
+            return merge(a, b).into();
+        }
+
         // A box dragged up and to the left has negative extents, which is
         // legal in the format but makes every later comparison work harder.
         let (x, y, w, h) = (e.x, e.y, e.width, e.height);
@@ -505,6 +517,35 @@ impl XdDoc {
         self.doc.apply(Command::Bind { arrow: arrow.to_string(), end, binding }).into()
     }
 
+    /// The shape an arrow endpoint at this point would bind to, or -1. The
+    /// editor draws Excalidraw's highlight around it while an endpoint is
+    /// being dragged, so the binding is visible before it is committed.
+    #[wasm_bindgen(js_name = bindableAt)]
+    pub fn bindable_at(&self, x: f64, y: f64, skip: &str) -> i32 {
+        xd_core::binding::bindable_at(self.doc.elements(), x, y, skip)
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Bind one end of an arrow to whatever is under it, or clear the binding
+    /// when there is nothing there, and re-aim the arrow either way.
+    #[wasm_bindgen(js_name = rebindEnd)]
+    pub fn rebind_end(&mut self, arrow: &str, at_end: bool) -> Change {
+        let (change, _bound) = ops::rebind_end(&mut self.doc, arrow, at_end);
+        change.into()
+    }
+
+    /// Whether that end is bound now. Separate from `rebindEnd` because
+    /// wasm-bindgen has no tuple, and the editor wants the flag for its
+    /// highlight rather than for its model.
+    #[wasm_bindgen(js_name = isBound)]
+    pub fn is_bound(&self, arrow: &str, at_end: bool) -> bool {
+        self.doc
+            .index_of(arrow)
+            .map(|i| &self.doc.elements()[i])
+            .is_some_and(|e| if at_end { e.end_binding.is_some() } else { e.start_binding.is_some() })
+    }
+
     // --- history ------------------------------------------------------------
 
     #[wasm_bindgen(js_name = canUndo)]
@@ -529,6 +570,19 @@ impl XdDoc {
         Some(change.into())
     }
 
+    /// Re-aim every arrow bound to anything that just moved, folded into the
+    /// same undo entry by the same coalesce key.
+    ///
+    /// Done here rather than left to the caller for the same reason the
+    /// version bookkeeping is done inside `apply`: a drag that forgets to
+    /// reflow leaves the diagram visibly coming apart, and "remember to call
+    /// this" is not a mechanism.
+    fn with_reflow(&mut self, change: xd_core::doc::Change, key: &str) -> Change {
+        let ids = self.selection.clone();
+        let extra = ops::reflow_bindings(&mut self.doc, &ids, some(key));
+        merge(change, extra).into()
+    }
+
     /// Undo can delete what was selected. Dropping the ids that no longer
     /// resolve is cheaper than teaching every reader to tolerate a selection
     /// that points at nothing.
@@ -542,6 +596,27 @@ impl XdDoc {
 /// argument costs a `JsValue` round trip on every pointer move.
 fn some(key: &str) -> Option<&str> {
     (!key.is_empty()).then_some(key)
+}
+
+/// Two changes as one. The revision is the later of the two; the dirty sets
+/// and boxes are unions.
+fn merge(a: xd_core::doc::Change, b: xd_core::doc::Change) -> xd_core::doc::Change {
+    let mut dirty = a.dirty;
+    for i in b.dirty {
+        if !dirty.contains(&i) {
+            dirty.push(i);
+        }
+    }
+    xd_core::doc::Change {
+        revision: a.revision.max(b.revision),
+        dirty,
+        bbox: match (a.bbox, b.bbox) {
+            (Some(x), Some(y)) => Some(x.union(&y)),
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        },
+        structural: a.structural || b.structural,
+    }
 }
 
 fn kind_of(kind: &str) -> ElementKind {

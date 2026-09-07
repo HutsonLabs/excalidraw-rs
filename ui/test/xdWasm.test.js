@@ -107,3 +107,49 @@ test("deleting a shape and undoing restores it with its unknown fields", () => {
   expect(d.length).toBe(1);
   expect(d.element(0).type).toBe("diamond");
 });
+
+test("an arrow drawn between two shapes binds to both and follows them", () => {
+  const d = doc();
+  d.beginDraft("rectangle", 0, 0, {});
+  d.draftTo(100, 100, false);
+  d.endDraft();
+  d.beginDraft("rectangle", 300, 0, {});
+  d.draftTo(400, 100, false);
+  d.endDraft();
+
+  // Drawn from inside the first box to inside the second, which is how a
+  // person draws one — the endpoints land on the shapes, not near them.
+  d.beginDraft("arrow", 50, 50, {});
+  d.draftTo(350, 50, false);
+  d.endDraft();
+
+  const arrow = d.elementId(2);
+  expect(d.isBound(arrow, false)).toBe(true);
+  expect(d.isBound(arrow, true)).toBe(true);
+
+  const tipOf = () => {
+    const e = d.element(2);
+    const last = e.points[e.points.length - 1];
+    return e.x + last[0];
+  };
+  const before = tipOf();
+
+  // Move the second box; the arrow's far end must come with it.
+  d.setSelection([1]);
+  d.dragBy(60, 0, "");
+  expect(tipOf() - before).toBeCloseTo(60, 1);
+});
+
+test("a bound arrow stops short of the shape rather than inside it", () => {
+  const d = doc();
+  d.beginDraft("ellipse", 200, 100, {});
+  d.draftTo(300, 200, false);
+  d.endDraft();
+  d.beginDraft("arrow", 0, 150, {});
+  d.draftTo(250, 150, false);
+  d.endDraft();
+  const e = d.element(1);
+  const last = e.points[e.points.length - 1];
+  // The ellipse's left extreme is x = 200; a bound arrow stops before it.
+  expect(e.x + last[0]).toBeLessThan(200);
+});

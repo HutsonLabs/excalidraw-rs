@@ -10,6 +10,7 @@
 //! knows JavaScript exists.
 #![forbid(unsafe_code)]
 
+pub mod binding;
 pub mod command;
 pub mod doc;
 pub mod format;
