@@ -13,7 +13,12 @@ crate-type = ["cdylib", "rlib"]
 xd-core = { path = "../xd-core", version = "0.1.0" }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# The same features as xd-core, spelled out rather than inherited through
+# Cargo's feature unification. `float_roundtrip` is not optional: without it
+# serde_json's float parser is not correctly rounded, and every open/save
+# shifts real coordinates by one ULP. Naming it here stops a future edit to
+# xd-core from silently un-fixing it for the build that ships.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 serde-wasm-bindgen = "0.6"
 getrandom = { version = "0.2", features = ["js"] }
 

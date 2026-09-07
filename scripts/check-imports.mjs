@@ -38,12 +38,27 @@ const ENTRY = resolve(ROOT, "ui/src/excalidrawEdit.js");
 const SRC = resolve(ROOT, "ui/src");
 const VENDOR = resolve(ROOT, "ui/vendor");
 
-/// What the portable unit may reach, from PLAN.md Phase 5. `a11y.js` is on the
-/// list because viewActions.js imports it; term.hut has all nine.
+/// What the portable unit may reach.
+///
+/// PLAN.md names nine files. Two more are here — `excalidrawDoc.js` (the
+/// "is this safe to save" decisions, mirroring bpmnDoc.js) and
+/// `excalidrawProps.js` (the shape properties panel). Both were added
+/// deliberately and both are *portable*: they live in `ui/src`, import nothing
+/// outside this list, and go across in the same copy the rest of the view
+/// does.
+///
+/// That distinction is the whole point of the check. PLAN.md's own risk list
+/// says that if this guard ever fails and the fix is "widen the allowlist",
+/// that is the moment to stop and look at what is actually being asked for.
+/// So: widening it for a new module that is part of the view is fine.
+/// Widening it for anything under `standalone/`, or for a host capability, is
+/// the bug the guard exists to catch — do not.
+///
+/// `a11y.js` is on the list because viewActions.js imports it.
 const ALLOWED = new Set([
   "excalidrawEdit.js", "excalidrawTools.js", "excalidrawView.js",
-  "excalidrawScene.js", "xdWasm.js", "dom.js", "viewActions.js",
-  "colorpicker.js", "a11y.js",
+  "excalidrawScene.js", "excalidrawDoc.js", "excalidrawProps.js",
+  "xdWasm.js", "dom.js", "viewActions.js", "colorpicker.js", "a11y.js",
 ]);
 
 // Static `import`/`export … from`, bare `import "x"`, and `import("x")` with a
