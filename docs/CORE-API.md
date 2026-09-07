@@ -126,3 +126,58 @@ the scene must equal the original including every `rest` map.
 There is no `SystemTime` in this crate: it compiles to wasm and must stay
 deterministic under test. The host calls `set_now(ms)` before applying; the
 default is 0.
+
+---
+
+## Added after the first pass
+
+The doc above pinned the API three agents wrote against in parallel. These
+arrived while they did, and are as load-bearing as anything above.
+
+### `Doc`
+
+```rust
+pub fn now(&self) -> i64;                       // the clock last set by set_now
+pub fn no_change(&self) -> Change;              // an empty Change; does NOT bump the revision
+pub fn fresh_identity(&mut self) -> (String, i64);  // a new id and a new seed
+pub fn set_seed(&mut self, seed: u64);          // makes the id/seed stream reproducible
+```
+
+`fresh_identity` is the **only** place in the crate that mints a seed;
+`new_element` goes through it. `Command::Batch(vec![])` is a clean no-op —
+no revision bump, no undo entry.
+
+### `ops.rs` — the verbs
+
+Composed from `command.rs` and `geometry.rs`. In the crate rather than behind
+the wasm shim, so a consumer of `xd-core` gets an editor and not just a data
+structure.
+
+```rust
+pub fn selection_bounds(doc: &Doc, ids: &[String]) -> Option<Bounds>;
+pub fn translate(doc: &mut Doc, ids: &[String], dx: f64, dy: f64, key: Option<&str>) -> Change;
+pub fn resize(doc: &mut Doc, ids: &[String], handle: Handle, px: f64, py: f64,
+              lock_aspect: bool, from_center: bool, key: Option<&str>) -> Change;
+pub fn rotate(doc: &mut Doc, ids: &[String], px: f64, py: f64, snap: f64, key: Option<&str>) -> Change;
+pub fn duplicate(doc: &mut Doc, ids: &[String], dx: f64, dy: f64) -> (Change, Vec<String>);
+pub fn set_style(doc: &mut Doc, ids: &[String], style: &Map<String, Value>) -> Change;
+pub fn reflow_bindings(doc: &mut Doc, ids: &[String], key: Option<&str>) -> Change;
+pub fn rebind_end(doc: &mut Doc, arrow_id: &str, at_end: bool) -> (Change, bool);
+```
+
+### `binding.rs` — arrows
+
+```rust
+pub const BINDING_THRESHOLD: f64;  pub const DEFAULT_GAP: f64;
+pub fn is_bindable(e: &Element) -> bool;
+pub fn bindable_at(elements: &[Element], x: f64, y: f64, skip: &str) -> Option<usize>;
+pub fn focus_for(shape: &Element, from: (f64, f64), at: (f64, f64)) -> f64;
+pub fn binding_point(shape: &Element, from: (f64, f64), focus: f64, gap: f64) -> (f64, f64);
+```
+
+## A trap, paid for once
+
+`serde_json::Map::remove` is a **swap** remove under the `preserve_order`
+feature: it drops the last key into the hole and silently reshuffles the map.
+That reorders an element's unknown `rest` keys, which is a lossy round trip by
+another name. **Use `shift_remove` everywhere in this crate.**
