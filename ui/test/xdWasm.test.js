@@ -7,15 +7,9 @@
 // can instantiate the module from bytes, so the whole document model is
 // exercised here at `bun test` speed.
 import { test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
-import { wrap } from "../src/xdWasm.js";
+import { blankDoc, openDoc } from "./wasmHarness.js";
 
-const mod = await import("../vendor/xd-wasm/xd_wasm.js");
-await mod.default({
-  module_or_path: readFileSync(new URL("../vendor/xd-wasm/xd_wasm_bg.wasm", import.meta.url)),
-});
-
-const doc = () => wrap(mod.XdDoc.blank());
+const doc = blankDoc;
 
 test("a blank document serializes as a scene Excalidraw would open", () => {
   const scene = JSON.parse(doc().toJson());
@@ -50,7 +44,7 @@ test("unknown fields survive a round trip through the model", () => {
     }],
     appState: { viewBackgroundColor: "#ffffff" },
   });
-  const d = wrap(mod.XdDoc.open(source));
+  const d = openDoc(source);
   d.setSelection([0]);
   d.dragBy(5, 5, "");
   const out = JSON.parse(d.toJson());

@@ -14,6 +14,13 @@
 //! both roundness schemes, deleted elements, and elements carrying keys
 //! invented here to stand in for whatever Excalidraw adds next.
 //!
+//! `excalidraw-com-export.excalidraw` is the odd one out and is labelled so
+//! nobody mistakes it: it is a *reconstruction* of a current excalidraw.com
+//! export, not a capture. The four `real-` files all predate fractional
+//! indexing and carry no `index`, so without it nothing in the corpus would
+//! exercise the key that decides z-order. Replace it with a genuine export the
+//! first time one is to hand.
+//!
 //! The properties, in the order they matter:
 //!
 //! 1. Nothing the file said is lost or changed (`nothing_the_file_said_is_lost`).
@@ -148,10 +155,16 @@ const DROPPABLE_NULLS: &[&str] = &[
 
 /// Keys we are allowed to *add*, and only with an empty value.
 ///
-/// Excalidraw writes all of these on every element (or, for the last two, on
-/// every scene). A file that omits them is one we normalise towards the format
-/// its own editor produces — which is the direction a round trip is allowed to
-/// move in, unlike the other one.
+/// Excalidraw writes all of these on every element (or, for `appState` and
+/// `files`, on every scene). A file that omits them is one we normalise
+/// towards the format its own editor produces — which is the direction a round
+/// trip is allowed to move in, unlike the other one.
+///
+/// `index` and `link` joined this list when they stopped riding in `rest`.
+/// That is the honest cost of modelling a key: an unknown key needs no
+/// allowance because it is copied verbatim, and a modelled one that Excalidraw
+/// always writes needs an addition allowance for the files that omit it. What
+/// does *not* change is the loss side — nothing new became droppable.
 const ADDABLE_DEFAULTS: &[&str] = &[
     "x",
     "y",
@@ -166,6 +179,8 @@ const ADDABLE_DEFAULTS: &[&str] = &[
     "versionNonce",
     "isDeleted",
     "boundElements",
+    "index",
+    "link",
     "appState",
     "files",
 ];
@@ -252,8 +267,6 @@ fn unknown_keys_come_back_with_their_values_intact() {
         "someFutureEmptyObject",
         "someFutureUnicode",
         "someFutureFalse",
-        "index",
-        "link",
     ] {
         assert_eq!(a[key], b[key], "element key {key}");
     }
@@ -327,6 +340,46 @@ fn an_element_type_we_cannot_draw_keeps_its_name() {
             "iframe"
         ]
     );
+}
+
+#[test]
+fn z_order_and_links_stay_in_their_own_slots() {
+    // `index` is Excalidraw's fractional index and the only thing that carries
+    // stacking order to excalidraw.com. While it rode in `rest` it survived a
+    // round trip but no command could keep it consistent, so a reorder here
+    // produced a file that reordered here and nowhere else. Modelling it is
+    // what makes that fixable; generating one is `Reorder`'s job.
+    let text = fixture("excalidraw-com-export.excalidraw");
+    let scene = parse(&text).unwrap();
+    let indexes: Vec<Option<&str>> = scene
+        .elements
+        .iter()
+        .map(|e| e.index.as_deref())
+        .collect();
+    assert_eq!(indexes, [Some("a0"), Some("a1"), Some("a2"), Some("a3"), Some("a4")]);
+    assert_eq!(scene.elements[2].link.as_deref(), Some("https://excalidraw.com"));
+    assert_eq!(scene.elements[0].link, None);
+    assert!(scene.elements.iter().all(|e| e.rest.get("index").is_none()));
+
+    // Both keep Excalidraw's slot rather than migrating to the end of the
+    // element, which is the entire point of modelling them.
+    let out = serialize(&scene);
+    let keys: Vec<&str> = out
+        .lines()
+        .skip_while(|l| !l.contains("\"id\": \"Qm7xK2pLvR9dN4sTfWbYc\""))
+        .take_while(|l| !l.contains("\"locked\""))
+        .filter_map(|l| l.trim().strip_prefix('"')?.split('"').next())
+        .collect();
+    let at = |k: &str| keys.iter().position(|x| *x == k);
+    assert!(at("frameId") < at("index") && at("index") < at("roundness"), "{keys:?}");
+    assert!(at("updated") < at("link"), "{keys:?}");
+
+    // A file that predates fractional indexing gains the "not yet indexed"
+    // state Excalidraw itself writes, not a fabricated order.
+    let bare: Value =
+        serde_json::from_str(&serialize(&parse(&fixture("minimal.excalidraw")).unwrap())).unwrap();
+    assert_eq!(bare["elements"][0]["index"], Value::Null);
+    assert_eq!(bare["elements"][0]["link"], Value::Null);
 }
 
 #[test]
@@ -472,7 +525,7 @@ const MODELLED: &[&str] = &[
     "id", "type", "x", "y", "width", "height", "angle", "strokeColor", "backgroundColor",
     "fillStyle", "strokeWidth", "strokeStyle", "roughness", "opacity", "groupIds", "frameId",
     "roundness", "seed", "version", "versionNonce", "isDeleted", "boundElements", "updated",
-    "locked", "text", "originalText", "fontSize", "fontFamily", "textAlign", "verticalAlign",
+    "locked", "index", "link", "text", "originalText", "fontSize", "fontFamily", "textAlign", "verticalAlign",
     "containerId", "lineHeight", "points", "pressures", "lastCommittedPoint", "startBinding",
     "endBinding", "fileId", "elementId", "focus", "gap", "source", "elements", "appState", "files",
 ];
@@ -555,12 +608,17 @@ mod arb {
                     (number(), number()).prop_map(|(a, b)| [a, b]),
                     0..6,
                 )),
+                // Fractional indexes are short strings from a base-62-ish
+                // alphabet ("a0", "a1", "a0V"); `None` is the legal
+                // "not yet indexed" state of a pre-2024 file.
+                prop::option::of("a[0-9A-Za-z]{1,3}"),
+                prop::option::of("https://[a-z]{1,8}\\.example"),
             ),
             any::<bool>(),
             rest(),
         )
             .prop_map(
-                |(id, kind, (x, y, w, h, angle), (seed, version, nonce, updated), (color, style, size, groups, points), deleted, rest)| {
+                |(id, kind, (x, y, w, h, angle), (seed, version, nonce, updated), (color, style, size, groups, points, index, link), deleted, rest)| {
                     Element {
                         id,
                         kind,
@@ -578,6 +636,8 @@ mod arb {
                         opacity: size,
                         group_ids: groups.unwrap_or_default(),
                         frame_id: None,
+                        index,
+                        link,
                         roundness: None,
                         seed,
                         version,

@@ -24,11 +24,13 @@
 //! for a format whose writer is `JSON.stringify` in a browser.
 //!
 //! 1. **A modelled key Excalidraw always writes is always written.** `frameId`,
-//!    `roundness` and `boundElements` are `null` on most real elements and
-//!    `groupIds` is usually `[]`. With `skip_serializing_if` those keys would
-//!    deserialize to `None`/empty and then vanish on save — a key silently
-//!    deleted from every element of every file we touch. So they carry no skip:
-//!    absent means `null`, which is exactly what Excalidraw writes.
+//!    `roundness`, `boundElements` and `link` are `null` on most real elements
+//!    and `groupIds` is usually `[]`. With `skip_serializing_if` those keys
+//!    would deserialize to `None`/empty and then vanish on save — a key
+//!    silently deleted from every element of every file we touch. So they carry
+//!    no skip: absent means `null`, which is exactly what Excalidraw writes.
+//!    `index` is in this set too, and for a stronger reason than tidiness —
+//!    see the field.
 //!
 //! 2. **Field order matches Excalidraw's.** `#[serde(flatten)]` emits the
 //!    declared fields first and `rest` last, so the declaration order below is
@@ -295,13 +297,29 @@ pub struct Element {
     pub opacity: Option<f64>,
 
     // --- structure ---
-    // The four below are written unconditionally: Excalidraw writes them on
+    // The five below are written unconditionally: Excalidraw writes them on
     // every element, so skipping them would delete a key from every element of
     // every file we save. Module header, rule 1.
     #[serde(default)]
     pub group_ids: Vec<String>,
     #[serde(default)]
     pub frame_id: Option<String>,
+    /// Excalidraw's fractional index — the string that decides z-order.
+    ///
+    /// Modelled rather than left to [`Element::rest`] because it is not
+    /// decoration: it is the *only* thing that carries stacking order between
+    /// this build and excalidraw.com. Position in the `elements` array is what
+    /// we reorder locally, and a file whose array we reordered while its
+    /// `index` strings stayed put opens back on excalidraw.com in the original
+    /// order — a reorder that appears to work here and silently does not
+    /// travel. A key in `rest` cannot be kept consistent by a command; a field
+    /// can.
+    ///
+    /// `None` is legal and means "not yet indexed" — files predating fractional
+    /// indexing have no `index` at all, and Excalidraw assigns them on load.
+    /// Nothing in this crate generates one yet; `Command::Reorder` owns that.
+    #[serde(default)]
+    pub index: Option<String>,
     #[serde(default)]
     pub roundness: Option<Roundness>,
 
@@ -319,6 +337,12 @@ pub struct Element {
     pub bound_elements: Option<Vec<BoundElement>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<i64>,
+    /// The URL an element links to. Inert here — nothing in this crate reads
+    /// it — but Excalidraw writes it on every element, so it is modelled for
+    /// the same reason as `frameId`: to keep it in its own slot instead of
+    /// migrating to the end of the element on the first save.
+    #[serde(default)]
+    pub link: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<bool>,
 

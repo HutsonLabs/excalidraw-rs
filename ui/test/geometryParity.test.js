@@ -12,14 +12,8 @@
 // and hit-tested in another, which is the single most confusing bug this
 // architecture can produce.
 import { test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
-import { wrap } from "../src/xdWasm.js";
+import { openDoc } from "./wasmHarness.js";
 import { elementBounds, sceneBounds, fitTransform, cornerRadius } from "../src/excalidrawScene.js";
-
-const mod = await import("../vendor/xd-wasm/xd_wasm.js");
-await mod.default({
-  module_or_path: readFileSync(new URL("../vendor/xd-wasm/xd_wasm_bg.wasm", import.meta.url)),
-});
 
 /// Elements chosen to hit the edges the two implementations could disagree on:
 /// negative extents, a linear element whose bounds come from its points, a
@@ -51,7 +45,7 @@ const scene = JSON.stringify({
   appState: {},
 });
 
-const doc = wrap(mod.XdDoc.open(scene));
+const doc = openDoc(scene);
 const js = JSON.parse(scene).elements;
 
 /// Floating-point arithmetic in two languages does not have to be bit-equal to

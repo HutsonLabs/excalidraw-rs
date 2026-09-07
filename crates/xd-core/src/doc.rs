@@ -619,6 +619,40 @@ impl Doc {
         Some(e)
     }
 
+    /// The fractional index an element landing at array position `pos` should
+    /// carry, or `None` if we cannot produce one.
+    ///
+    /// **What a missing neighbour means.** The scan walks outwards past any
+    /// element whose `index` is absent or unreadable, and treats "nothing
+    /// found in that direction" as unbounded. It does not backfill: a file
+    /// that arrived with no indices at all keeps none except on the elements
+    /// we actually touch.
+    ///
+    /// That is safe because of what Excalidraw does on load — it walks the
+    /// array and regenerates the index of every element whose key is missing
+    /// or not greater than its predecessor's, using the array order as the
+    /// truth. So an unindexed file already round-trips correctly through the
+    /// array alone, and a partly-indexed one has its gaps filled in a way that
+    /// agrees with the keys we did write. Backfilling every element here would
+    /// mean touching, and bumping the version of, elements the user never
+    /// edited — churn in the diff and churn in anyone's reconciliation.
+    fn index_for_position(&self, pos: usize) -> Option<String> {
+        let usable = |e: &Element| -> Option<String> {
+            match &e.index {
+                Some(k) if valid_key(k) => Some(k.clone()),
+                _ => None,
+            }
+        };
+        let lower = self.scene.elements[..pos.min(self.scene.elements.len())]
+            .iter()
+            .rev()
+            .find_map(usable);
+        let upper = self.scene.elements[pos.min(self.scene.elements.len())..]
+            .iter()
+            .find_map(usable);
+        index_between(lower.as_deref(), upper.as_deref())
+    }
+
     /// Rebuild the element vector in the given id order. Anything the order
     /// does not name keeps its relative position on the end, which cannot
     /// happen from our own records but keeps a hand-built order from
@@ -668,7 +702,17 @@ impl Doc {
                 // this module exists to refuse.
                 let n = self.scene.elements.len();
                 let index = at.unwrap_or(n).min(n);
-                let el = (**element).clone();
+                let mut el = (**element).clone();
+                // The fractional index comes from where the element actually
+                // lands, not from whatever it arrived carrying. `new_element`
+                // guesses "on top" because that is where a freshly drawn shape
+                // goes, and a duplicate arrives holding a *copy* of the
+                // original's key — two elements with one index is exactly the
+                // ambiguity the scheme exists to prevent, so this overwrites
+                // unconditionally rather than filling in a blank.
+                if let Some(key) = self.index_for_position(index) {
+                    el.index = Some(key);
+                }
                 self.insert_at(index, el.clone(), acc);
                 out.push(Edit::Inserted {
                     index,
@@ -753,12 +797,23 @@ impl Doc {
     /// over another selected element, so repeated presses keep the selection
     /// together instead of shuffling it.
     ///
-    /// Known gap, written down rather than discovered later: newer Excalidraw
-    /// files also carry a fractional `index` string per element, which we
-    /// round-trip in `Element::rest` but do not rewrite. A reordered scene
-    /// therefore re-sorts to its original z-order when opened in Excalidraw
-    /// proper. Fixing it means implementing fractional indexing, which is a
-    /// Phase 6 concern (PLAN.md gates every milestone on a round-trip check).
+    /// A reorder moves array positions *and* rewrites the fractional `index`
+    /// of the elements that moved, because excalidraw.com re-sorts by `index`
+    /// on load and would otherwise put the drawing straight back the way it
+    /// was — a reorder that appears to work here and does not travel.
+    ///
+    /// Only the elements that actually changed position are reindexed, and
+    /// they are reindexed a run at a time between the keys of the neighbours
+    /// that did not move. Rewriting every element's index on every reorder is
+    /// precisely the churn fractional indexing exists to avoid.
+    ///
+    /// **These writes do bump the version.** The earlier rule — that a
+    /// reorder touches no element field, so no version moves — was true when
+    /// z-order lived only in the array. `index` is a field, and a collaborator
+    /// that does not see the version move keeps the stale key and puts the
+    /// drawing back in the old order. Elements that merely shifted position
+    /// because something moved past them keep their key and their version:
+    /// nothing about them changed.
     fn reorder(&mut self, ids: &[String], how: Reorder, out: &mut Vec<Edit>, acc: &mut Acc) {
         let prev: Vec<String> = self.scene.elements.iter().map(|e| e.id.clone()).collect();
         let n = prev.len();
@@ -812,7 +867,57 @@ impl Doc {
             }
         }
         acc.structural = true;
-        out.push(Edit::Reordered { prev, next });
+
+        // The elements whose position genuinely changed. An unselected element
+        // that shifted along because the selection went past it has not moved
+        // relative to the others that stayed, so its key is still correct.
+        let moved: Vec<String> = next
+            .iter()
+            .filter(|id| prev.iter().position(|p| p == *id) != next.iter().position(|p| p == *id))
+            .cloned()
+            .collect();
+        out.push(Edit::Reordered { prev, next: next.clone() });
+
+        // Walk the new order, reindexing each maximal run of moved elements
+        // between the keys on either side of it. Runs are handled left to
+        // right, so anything before the run has its final key already;
+        // anything after that is itself still waiting is skipped, because its
+        // key is the stale one we are about to replace.
+        let mut i = 0;
+        while i < next.len() {
+            if !moved.contains(&next[i]) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < next.len() && moved.contains(&next[i]) {
+                i += 1;
+            }
+            let run = &next[start..i];
+            let lower = self.scene.elements[..start]
+                .iter()
+                .rev()
+                .find_map(|e| e.index.as_deref().filter(|k| valid_key(k)).map(String::from));
+            let upper = self.scene.elements[i..]
+                .iter()
+                .filter(|e| !moved.contains(&e.id))
+                .find_map(|e| e.index.as_deref().filter(|k| valid_key(k)).map(String::from));
+            let keys = indices_between(lower.as_deref(), upper.as_deref(), run.len());
+            if keys.len() != run.len() {
+                // The space between the neighbours is exhausted, or one of
+                // them is a key we do not understand. The array order is still
+                // right; leaving the indices alone is the honest failure.
+                continue;
+            }
+            for (id, key) in run.iter().cloned().zip(keys) {
+                self.write(
+                    &id,
+                    vec![("index".to_string(), Some(Value::String(key)))],
+                    out,
+                    acc,
+                );
+            }
+        }
     }
 
     /// Attach or detach one end of an arrow, maintaining both halves.
@@ -986,6 +1091,12 @@ impl Doc {
     pub fn new_element(&mut self, kind: ElementKind, b: &Bounds) -> Element {
         let (id, seed) = self.fresh_identity();
         let version_nonce = self.rng.next_nonce();
+        // A fresh shape goes on top, which is where a drawing gesture puts it.
+        // `Command::Insert` recomputes this from where the element actually
+        // lands, so an element inserted lower down is still keyed correctly;
+        // setting it here means an element is well-formed the moment it exists,
+        // including for a caller that inspects it before inserting.
+        let index = self.index_for_position(self.scene.elements.len());
         let width = b.width();
         let height = b.height();
 
@@ -1032,6 +1143,8 @@ impl Doc {
 
             group_ids: Vec::new(),
             frame_id: None,
+            index,
+            link: None,
             is_deleted: false,
             locked: Some(false),
             bound_elements: None,
@@ -1055,6 +1168,332 @@ impl Doc {
             rest: Map::new(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fractional indexing
+//
+// Excalidraw orders elements by a base-62 fractional index string — "a0", then
+// "a1", and between those two, "a0V". The array order in the file is expected
+// to agree with it, and excalidraw.com re-sorts by `index` on load. That is
+// why a reorder that only moved array positions was invisible over there: the
+// file said one thing in its ordering and another in its keys, and Excalidraw
+// believed the keys.
+//
+// This is a port of the `fractional-indexing` algorithm Excalidraw uses,
+// written out rather than pulled in as a dependency: the crate compiles to
+// wasm against a 586 KB budget (PLAN.md, Phase 4), and this is two hundred
+// lines of string arithmetic with no allocation to speak of.
+//
+// A key is an integer part followed by a fractional part. The integer part's
+// first character encodes both its sign and its length — 'a' means two
+// characters total, 'b' three, up to 'z'; 'Z' means two counting down through
+// 'A' for the negatives. That is what lets keys of different magnitudes still
+// compare correctly as plain strings, which is the whole trick: ordering is
+// `<` on a String, in any language, with no parsing.
+//
+// Nothing here panics or asserts. A file in the wild can carry an `index` that
+// is not a valid key at all, and the answer to that is to decline to generate
+// (return `None`) and leave the element's index alone — never to bring down
+// the editor over a field we did not write.
+// ---------------------------------------------------------------------------
+
+const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// The one key with no predecessor. Excalidraw refuses it as an input for the
+/// same reason: there is nothing to generate below it.
+const SMALLEST_INTEGER: &str = "A00000000000000000000000000";
+
+fn digit_value(c: u8) -> Option<usize> {
+    DIGITS.iter().position(|d| *d == c)
+}
+
+/// How many characters this key's integer part occupies, read out of its first
+/// character. `None` for a character that is not a legal head.
+fn integer_length(head: u8) -> Option<usize> {
+    match head {
+        b'a'..=b'z' => Some((head - b'a') as usize + 2),
+        b'A'..=b'Z' => Some((b'Z' - head) as usize + 2),
+        _ => None,
+    }
+}
+
+fn integer_part(key: &str) -> Option<&str> {
+    let len = integer_length(*key.as_bytes().first()?)?;
+    if len > key.len() || !key.is_char_boundary(len) {
+        return None;
+    }
+    Some(&key[..len])
+}
+
+/// Is this a key we can generate against? Anything else in a file's `index` is
+/// something we did not write and will not reason about.
+fn valid_key(key: &str) -> bool {
+    if key == SMALLEST_INTEGER {
+        return false;
+    }
+    match integer_part(key) {
+        // A trailing '0' in the fractional part would make the key ambiguous:
+        // "a01" and "a010" name the same position.
+        Some(i) => !key[i.len()..].ends_with('0'),
+        None => false,
+    }
+}
+
+fn from_bytes(head: u8, digs: Vec<u8>) -> Option<String> {
+    let mut out = Vec::with_capacity(digs.len() + 1);
+    out.push(head);
+    out.extend(digs);
+    String::from_utf8(out).ok()
+}
+
+fn increment_integer(x: &str) -> Option<String> {
+    let head = *x.as_bytes().first()?;
+    if integer_length(head)? != x.len() {
+        return None;
+    }
+    let mut digs: Vec<u8> = x.as_bytes()[1..].to_vec();
+    let mut carry = true;
+    let mut i = digs.len();
+    while carry && i > 0 {
+        i -= 1;
+        let d = digit_value(digs[i])? + 1;
+        if d == DIGITS.len() {
+            digs[i] = b'0';
+        } else {
+            digs[i] = DIGITS[d];
+            carry = false;
+        }
+    }
+    if !carry {
+        return from_bytes(head, digs);
+    }
+    // The digits wrapped, so the integer part grows a character — or crosses
+    // from negative to positive, which is what "Z" -> "a0" is.
+    if head == b'Z' {
+        return Some("a0".to_string());
+    }
+    if head == b'z' {
+        return None;
+    }
+    let h = head + 1;
+    if h > b'a' {
+        digs.push(b'0');
+    } else {
+        digs.pop();
+    }
+    from_bytes(h, digs)
+}
+
+fn decrement_integer(x: &str) -> Option<String> {
+    let head = *x.as_bytes().first()?;
+    if integer_length(head)? != x.len() {
+        return None;
+    }
+    let last = *DIGITS.last()?;
+    let mut digs: Vec<u8> = x.as_bytes()[1..].to_vec();
+    let mut borrow = true;
+    let mut i = digs.len();
+    while borrow && i > 0 {
+        i -= 1;
+        let d = digit_value(digs[i])?;
+        if d == 0 {
+            digs[i] = last;
+        } else {
+            digs[i] = DIGITS[d - 1];
+            borrow = false;
+        }
+    }
+    if !borrow {
+        return from_bytes(head, digs);
+    }
+    if head == b'a' {
+        return Some(format!("Z{}", last as char));
+    }
+    if head == b'A' {
+        return None;
+    }
+    let h = head - 1;
+    if h < b'Z' {
+        digs.push(last);
+    } else {
+        digs.pop();
+    }
+    from_bytes(h, digs)
+}
+
+/// A fractional part strictly between `a` and `b`, where `b` unbounded means
+/// "anything larger". Both are fractional parts, not whole keys.
+fn midpoint(a: &str, b: Option<&str>) -> Option<String> {
+    if let Some(b) = b {
+        if a >= b || b.ends_with('0') {
+            return None;
+        }
+    }
+    if a.ends_with('0') {
+        return None;
+    }
+    if let Some(bs) = b {
+        // Share the longest common prefix and recurse on what is left; a
+        // missing character on the `a` side reads as '0', because a shorter
+        // key is the same key with zeros after it.
+        let ab = a.as_bytes();
+        let bb = bs.as_bytes();
+        let mut n = 0;
+        while n < bb.len() && *ab.get(n).unwrap_or(&b'0') == bb[n] {
+            n += 1;
+        }
+        if n > 0 {
+            let rest = midpoint(&a[n.min(a.len())..], Some(&bs[n..]))?;
+            return Some(format!("{}{}", &bs[..n], rest));
+        }
+    }
+    let digit_a = match a.as_bytes().first() {
+        Some(c) => digit_value(*c)?,
+        None => 0,
+    };
+    let digit_b = match b {
+        Some(bs) => digit_value(*bs.as_bytes().first()?)?,
+        None => DIGITS.len(),
+    };
+    if digit_b <= digit_a {
+        // Only reachable from a malformed input that slipped the checks above.
+        return None;
+    }
+    if digit_b - digit_a > 1 {
+        // Room between them: take the middle digit and stop.
+        let mid = (digit_a + digit_b).div_ceil(2);
+        return Some((DIGITS[mid] as char).to_string());
+    }
+    // The digits are adjacent, so the answer has to be longer than one of them.
+    match b {
+        Some(bs) if bs.len() > 1 => Some(bs[..1].to_string()),
+        _ => {
+            let tail = midpoint(a.get(1..).unwrap_or(""), None)?;
+            Some(format!("{}{}", DIGITS[digit_a] as char, tail))
+        }
+    }
+}
+
+/// A fractional index strictly between `a` and `b`. `None` for either side
+/// means unbounded — "before everything" or "after everything".
+///
+/// Returns `None` when a neighbour is not a key we recognise, when they are
+/// out of order, or when the space between them is exhausted. Every caller
+/// treats that as "leave the index alone".
+pub fn index_between(a: Option<&str>, b: Option<&str>) -> Option<String> {
+    if a.is_some_and(|k| !valid_key(k)) || b.is_some_and(|k| !valid_key(k)) {
+        return None;
+    }
+    match (a, b) {
+        (None, None) => Some("a0".to_string()),
+        (None, Some(b)) => {
+            let ib = integer_part(b)?;
+            if ib == SMALLEST_INTEGER {
+                return Some(format!("{ib}{}", midpoint("", Some(&b[ib.len()..]))?));
+            }
+            // `b` has a fractional part, so its bare integer part already
+            // sorts below it and is the cheapest answer.
+            if ib < b {
+                return Some(ib.to_string());
+            }
+            decrement_integer(ib)
+        }
+        (Some(a), None) => {
+            let ia = integer_part(a)?;
+            match increment_integer(ia) {
+                Some(i) => Some(i),
+                None => Some(format!("{ia}{}", midpoint(&a[ia.len()..], None)?)),
+            }
+        }
+        (Some(a), Some(b)) => {
+            if a >= b {
+                return None;
+            }
+            let ia = integer_part(a)?;
+            let ib = integer_part(b)?;
+            if ia == ib {
+                return Some(format!(
+                    "{ia}{}",
+                    midpoint(&a[ia.len()..], Some(&b[ib.len()..]))?
+                ));
+            }
+            let i = increment_integer(ia)?;
+            if i.as_str() < b {
+                return Some(i);
+            }
+            Some(format!("{ia}{}", midpoint(&a[ia.len()..], None)?))
+        }
+    }
+}
+
+/// `n` ascending indices strictly between `a` and `b`.
+///
+/// Bisecting rather than chaining matters: generating a run of keys by
+/// repeatedly asking for one more after the last would make each key a
+/// character longer than the one before when the range is bounded, and a
+/// multi-select sent to the back would leave a trail of ever-growing strings
+/// in the file. Splitting the range keeps them short.
+///
+/// Returns an empty vector if it cannot produce all `n`; callers check the
+/// length rather than trusting a partial answer.
+pub fn indices_between(a: Option<&str>, b: Option<&str>, n: usize) -> Vec<String> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return index_between(a, b).into_iter().collect();
+    }
+    // Unbounded on one side: walking outwards is already cheap there, because
+    // each step just increments the integer part.
+    if b.is_none() {
+        let mut out: Vec<String> = Vec::with_capacity(n);
+        let mut cur = match index_between(a, None) {
+            Some(k) => k,
+            None => return Vec::new(),
+        };
+        out.push(cur.clone());
+        for _ in 1..n {
+            cur = match index_between(Some(&cur), None) {
+                Some(k) => k,
+                None => return Vec::new(),
+            };
+            out.push(cur.clone());
+        }
+        return out;
+    }
+    if a.is_none() {
+        let mut out: Vec<String> = Vec::with_capacity(n);
+        let mut cur = match index_between(None, b) {
+            Some(k) => k,
+            None => return Vec::new(),
+        };
+        out.push(cur.clone());
+        for _ in 1..n {
+            cur = match index_between(None, Some(&cur)) {
+                Some(k) => k,
+                None => return Vec::new(),
+            };
+            out.push(cur.clone());
+        }
+        out.reverse();
+        return out;
+    }
+    let mid = n / 2;
+    let Some(c) = index_between(a, b) else {
+        return Vec::new();
+    };
+    let mut out = indices_between(a, Some(&c), mid);
+    if out.len() != mid {
+        return Vec::new();
+    }
+    out.push(c.clone());
+    let tail = indices_between(Some(&c), b, n - mid - 1);
+    if tail.len() != n - mid - 1 {
+        return Vec::new();
+    }
+    out.extend(tail);
+    out
 }
 
 /// Fold `src` into `dst`, keeping the original before-state and the newest
