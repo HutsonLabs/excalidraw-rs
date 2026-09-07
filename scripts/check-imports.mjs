@@ -58,6 +58,7 @@ const VENDOR = resolve(ROOT, "ui/vendor");
 const ALLOWED = new Set([
   "excalidrawEdit.js", "excalidrawTools.js", "excalidrawView.js",
   "excalidrawScene.js", "excalidrawDoc.js", "excalidrawProps.js",
+  "excalidrawToolbar.js",
   "xdWasm.js", "dom.js", "viewActions.js", "colorpicker.js", "a11y.js",
 ]);
 
