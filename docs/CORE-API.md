@@ -40,10 +40,21 @@ pub fn marquee_hits(elements: &[Element], area: &Bounds, contain: bool) -> Vec<u
 pub enum Handle { Nw, N, Ne, E, Se, S, Sw, W, Rotate }
 impl Handle { pub fn as_u32(self) -> u32; pub fn from_u32(v: u32) -> Option<Handle>; }
 
+/// The frame a selection is described and resized in: one element's own
+/// UNROTATED box plus its angle, or the axis-aligned union for several. The
+/// rotated AABB is the wrong answer and a self-consistent one, which is why it
+/// survived a first pass — see the comment on the function.
+pub struct SelectionFrame { pub bounds: Bounds, pub angle: f64 }
+pub fn selection_frame<'a>(elements: impl IntoIterator<Item = &'a Element>) -> Option<SelectionFrame>;
+
 /// The nine handle positions for a selection box drawn at `angle`, in scene
-/// coordinates, in `Handle` order.
-pub fn handle_points(b: &Bounds, angle: f64) -> [(f64, f64); 9];
-pub fn handle_at(b: &Bounds, angle: f64, x: f64, y: f64, radius: f64) -> Option<Handle>;
+/// coordinates, in `Handle` order. `scene_per_px` is the reciprocal of the
+/// zoom: the rotate handle floats a constant distance above the box ON SCREEN
+/// (`ROTATE_HANDLE_OFFSET_PX`, 20, the same number the painter draws it at),
+/// and the other eight sit on the box and ignore the scale.
+pub const ROTATE_HANDLE_OFFSET_PX: f64 = 20.0;
+pub fn handle_points(b: &Bounds, angle: f64, scene_per_px: f64) -> [(f64, f64); 9];
+pub fn handle_at(b: &Bounds, angle: f64, x: f64, y: f64, radius: f64, scene_per_px: f64) -> Option<Handle>;
 
 /// The new box when `handle` is dragged to `(px, py)`. `lock_aspect` keeps the
 /// ratio; `from_center` resizes about the centre (alt-drag).
@@ -181,3 +192,14 @@ pub fn binding_point(shape: &Element, from: (f64, f64), focus: f64, gap: f64) ->
 feature: it drops the last key into the hole and silently reshuffles the map.
 That reorders an element's unknown `rest` keys, which is a lossy round trip by
 another name. **Use `shift_remove` everywhere in this crate.**
+
+## A known divergence from excalidraw.com
+
+Rotation pivots on `element_center` (`x + width/2`) for every kind, which is
+what `excalidrawView.js` draws. Excalidraw itself pivots a linear element on
+its *points'* bounds centre, so a rotated line whose points extend negatively
+will disagree with excalidraw.com.
+
+Left as-is deliberately: it is the painter that is approximate, and moving the
+crate off what is actually drawn would break hit-testing against the pixels on
+screen. Fix both sides together, with a round-trip check, or neither.
