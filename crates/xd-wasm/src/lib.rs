@@ -397,6 +397,15 @@ impl XdDoc {
         let e = &self.doc.elements()[i];
         let mut points = e.points.clone().unwrap_or_default();
         let mut pressures = e.pressures.clone().unwrap_or_default();
+        // A freedraw element is seeded with its first point and no pressure
+        // for it, so the two arrays start one apart and stay that way for the
+        // life of the stroke. perfect-freehand indexes them together: with
+        // `simulatePressure` on nothing shows, but a pen reports real values
+        // and every one of them lands on the wrong point. Pad to the points
+        // already there before adding this one.
+        while pressures.len() < points.len() {
+            pressures.push(pressure);
+        }
         points.push([x - e.x, y - e.y]);
         pressures.push(pressure);
         let (mut w, mut h) = (0.0f64, 0.0f64);
@@ -422,6 +431,14 @@ impl XdDoc {
         let Some(id) = self.draft.take() else { return self.doc.no_change().into() };
         let Some(i) = self.doc.index_of(&id) else { return self.doc.no_change().into() };
         let e = &self.doc.elements()[i];
+        // Text is committed by the overlay, not by the drag that created it:
+        // it is 0×0 until the editor has measured what was typed. Sending it
+        // through the empty-draft rule below would delete it before the user
+        // could type a character, and the only thing standing between that and
+        // the current behaviour is a `<` rather than a `<=`. Say so instead.
+        if e.kind == ElementKind::Text {
+            return self.doc.no_change().into();
+        }
         let empty = match &e.points {
             Some(p) => p.len() < 2,
             None => e.width.abs() < min_size && e.height.abs() < min_size,

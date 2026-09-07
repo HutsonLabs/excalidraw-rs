@@ -21,6 +21,7 @@ import { div } from "../src/dom.js";
 import { renderActions } from "../src/viewActions.js";
 import { parseScene } from "../src/excalidrawScene.js";
 import { renderExcalidrawCanvas } from "../src/excalidrawView.js";
+import { renderExcalidraw } from "../src/excalidrawEdit.js";
 import {
   basename, chooseOpenPath, chooseSavePath, emptyScene, installShortcuts,
   isApp, readFile, startupPath, writeFile,
@@ -29,25 +30,20 @@ import { exportActions } from "./export.js";
 
 // --- the mount ---------------------------------------------------------------
 //
-// One binding, and it is the seam. Today it is an adapter over the read-only
-// painter, so the app runs and draws a real file end to end before the editor
-// exists — which is worth a lot: the window, the dialogs, the header, the
-// theming and the teardown all get exercised against something real instead of
-// being written blind and debugged all at once later.
+// One binding, and it is the seam. It now points at the editor, and that swap
+// was the whole of the change to this file — which is the point of having
+// written the adapter below to the *editor's* contract rather than to the
+// painter's. The call shape `mountView(host, text, { onSave, onActions })`
+// returning a dispose function is Phase 5's contract, and it was already what
+// the rest of this file called.
 //
-// When excalidrawEdit.js lands, this becomes:
-//
-//   import { renderExcalidraw } from "../src/excalidrawEdit.js";
-//   const mountView = renderExcalidraw;
-//
-// and nothing else in this file changes. That is the point of writing the
-// adapter to the editor's contract rather than to the painter's: the call
-// shape below — `mountView(host, text, { onSave, onActions })` returning a
-// dispose function — is Phase 5's contract, and it is already what the rest of
-// this file calls.
-const mountView = mountReadOnlyPainter;
+// The adapter is kept, unreferenced, as the read-only fallback: it is the
+// thing to point this binding back at if the WASM core ever fails to build,
+// and it is a working demonstration that the seam takes either side.
+const mountView = renderExcalidraw;
 
-/// The adapter. Takes the editor's arguments and drives the viewer with them.
+/// The read-only adapter. Takes the editor's arguments and drives the viewer
+/// with them.
 ///
 /// Two things it does *not* do, both on purpose:
 ///

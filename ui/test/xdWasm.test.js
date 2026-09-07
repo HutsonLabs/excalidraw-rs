@@ -147,3 +147,27 @@ test("a bound arrow stops short of the shape rather than inside it", () => {
   // The ellipse's left extreme is x = 200; a bound arrow stops before it.
   expect(e.x + last[0]).toBeLessThan(200);
 });
+
+test("a freehand stroke's pressures line up with its points", () => {
+  const d = blankDoc();
+  d.beginDraft("freedraw", 0, 0, {});
+  for (let i = 1; i <= 5; i++) d.draftPoint(i * 3, i * 2, 0.25 + i * 0.1);
+  d.endDraft();
+  const el = d.element(0);
+  // perfect-freehand indexes the two arrays together. One short and every
+  // pressure lands on the wrong point — invisible with simulated pressure,
+  // visible with a pen.
+  expect(el.pressures.length).toBe(el.points.length);
+});
+
+test("a text element survives being created before anything is typed", () => {
+  const d = blankDoc();
+  d.beginDraft("text", 40, 40, { fontSize: 20 });
+  d.endDraft();
+  // Text is 0x0 until the overlay has measured what was typed; the empty-draft
+  // rule must not reach it.
+  expect(d.length).toBe(1);
+  expect(d.element(0).type).toBe("text");
+  d.patch(d.elementId(0), { text: "hello", width: 60, height: 25 });
+  expect(d.element(0).text).toBe("hello");
+});
