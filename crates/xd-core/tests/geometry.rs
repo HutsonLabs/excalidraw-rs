@@ -380,7 +380,7 @@ fn a_deleted_element_is_not_in_a_marquee() {
 #[test]
 fn handles_sit_on_the_box_with_rotate_above_it() {
     let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
-    let p = handle_points(&b, 0.0);
+    let p = handle_points(&b, 0.0, 1.0);
     assert_eq!(p[Handle::Nw.as_u32() as usize], (0.0, 0.0));
     assert_eq!(p[Handle::N.as_u32() as usize], (50.0, 0.0));
     assert_eq!(p[Handle::Ne.as_u32() as usize], (100.0, 0.0));
@@ -389,32 +389,71 @@ fn handles_sit_on_the_box_with_rotate_above_it() {
     assert_eq!(p[Handle::S.as_u32() as usize], (50.0, 100.0));
     assert_eq!(p[Handle::Sw.as_u32() as usize], (0.0, 100.0));
     assert_eq!(p[Handle::W.as_u32() as usize], (0.0, 50.0));
-    assert_eq!(p[Handle::Rotate.as_u32() as usize], (50.0, -ROTATE_HANDLE_OFFSET));
+    assert_eq!(p[Handle::Rotate.as_u32() as usize], (50.0, -ROTATE_HANDLE_OFFSET_PX));
 }
 
 #[test]
 fn handles_rotate_with_the_selection() {
     let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
-    let p = handle_points(&b, std::f64::consts::PI);
+    let p = handle_points(&b, std::f64::consts::PI, 1.0);
     close(p[0].0, 100.0);
     close(p[0].1, 100.0);
     close(p[8].0, 50.0);
-    close(p[8].1, 100.0 + ROTATE_HANDLE_OFFSET);
+    close(p[8].1, 100.0 + ROTATE_HANDLE_OFFSET_PX);
 }
 
 #[test]
 fn handle_at_finds_the_one_under_the_pointer() {
     let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
-    assert_eq!(handle_at(&b, 0.0, 100.0, 100.0, 8.0), Some(Handle::Se));
-    assert_eq!(handle_at(&b, 0.0, 50.0, -ROTATE_HANDLE_OFFSET, 8.0), Some(Handle::Rotate));
-    assert_eq!(handle_at(&b, 0.0, 50.0, 50.0, 8.0), None);
+    assert_eq!(handle_at(&b, 0.0, 100.0, 100.0, 8.0, 1.0), Some(Handle::Se));
+    assert_eq!(handle_at(&b, 0.0, 50.0, -ROTATE_HANDLE_OFFSET_PX, 8.0, 1.0), Some(Handle::Rotate));
+    assert_eq!(handle_at(&b, 0.0, 50.0, 50.0, 8.0, 1.0), None);
 }
 
 #[test]
 fn rotate_wins_an_overlap_or_a_small_shape_could_never_be_turned() {
     let tiny = Bounds::new(0.0, 0.0, 1.0, 1.0);
     // Nearest would say N; rotate is checked first on purpose.
-    assert_eq!(handle_at(&tiny, 0.0, 0.5, -1.0, 30.0), Some(Handle::Rotate));
+    assert_eq!(handle_at(&tiny, 0.0, 0.5, -1.0, 30.0, 1.0), Some(Handle::Rotate));
+}
+
+#[test]
+fn the_rotate_handle_floats_a_constant_distance_on_screen() {
+    // The defect this pins: a scene-unit offset puts the handle six pixels
+    // above the box at 25% zoom and ninety-six at 400%, so it is either
+    // indistinguishable from the north handle or nowhere near the shape. The
+    // JS painter asserts the same invariant in excalidrawChrome.test.js.
+    let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
+    for zoom in [0.25, 0.5, 1.0, 2.0, 4.0] {
+        let p = handle_points(&b, 0.0, 1.0 / zoom);
+        let n = p[Handle::N.as_u32() as usize];
+        let r = p[Handle::Rotate.as_u32() as usize];
+        close(r.0, n.0);
+        close((n.1 - r.1) * zoom, ROTATE_HANDLE_OFFSET_PX);
+    }
+}
+
+#[test]
+fn a_nonsense_scale_reads_as_one_to_one() {
+    // A zero would drop the rotate handle onto the north handle and make the
+    // two one ambiguous target; a NaN would lose it entirely.
+    let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
+    let sane = handle_points(&b, 0.0, 1.0)[8];
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(handle_points(&b, 0.0, bad)[8], sane);
+    }
+}
+
+#[test]
+fn the_rotate_handle_is_grabbable_at_any_zoom() {
+    let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
+    for zoom in [0.25, 1.0, 4.0] {
+        let scene_per_px = 1.0 / zoom;
+        let at = (50.0, -ROTATE_HANDLE_OFFSET_PX * scene_per_px);
+        // An 8 px grab radius, in scene units, exactly as the editor passes it.
+        let r = 8.0 * scene_per_px;
+        assert_eq!(handle_at(&b, 0.0, at.0, at.1, r, scene_per_px), Some(Handle::Rotate));
+    }
 }
 
 #[test]
@@ -424,6 +463,93 @@ fn handle_numbering_round_trips() {
         assert_eq!(h.as_u32(), v);
     }
     assert_eq!(Handle::from_u32(9), None);
+}
+
+// --- the selection frame ----------------------------------------------------
+
+/// The angle in every frame test below. Thirty degrees is the classic case:
+/// far enough off-axis that the AABB and the element's own box are visibly
+/// different boxes, and a size a user would actually reach for.
+const DEG30: f64 = std::f64::consts::PI / 6.0;
+
+fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+#[test]
+fn a_single_rotated_element_is_framed_by_its_own_box_not_its_aabb() {
+    let e = rect(json!({ "angle": DEG30 }));
+    let f = selection_frame([&e]).expect("one element has a frame");
+    assert_eq!(f.bounds, element_bounds(&e).expect("a rectangle has bounds"));
+    close(f.angle, DEG30);
+
+    // Handles framed this way sit on the rectangle's own corners: 100 apart
+    // along one edge and 50 along the next, which is the rectangle.
+    let h = handle_points(&f.bounds, f.angle, 1.0);
+    close(dist(h[0], h[2]), 100.0);
+    close(dist(h[2], h[4]), 50.0);
+
+    // The rotated AABB is a bigger box the shape only touches at four points.
+    // Framing the handles with it is the defect this test exists for: they
+    // leave the shape's edges, and the drag then resizes the box rather than
+    // the rectangle inside it.
+    let aabb = element_bounds_rotated(&e).expect("a rectangle has bounds");
+    assert!(aabb.width() > f.bounds.width() + 1.0);
+    assert!(aabb.height() > f.bounds.height() + 1.0);
+    let wrong = handle_points(&aabb, f.angle, 1.0);
+    assert!(dist(wrong[0], wrong[2]) > 110.0, "the AABB's north edge is not the shape's");
+}
+
+#[test]
+fn several_elements_fall_back_to_an_axis_aligned_box() {
+    // A multi-selection has no shared angle to work in.
+    let a = rect(json!({}));
+    let b = rect(json!({ "id": "r2", "x": 200, "y": 0, "width": 10, "height": 10 }));
+    let f = selection_frame([&a, &b]).expect("two elements have a frame");
+    assert_eq!(f.angle, 0.0);
+    assert_eq!(f.bounds, Bounds::new(10.0, 0.0, 210.0, 70.0));
+
+    // And a rotated member contributes the box it actually occupies.
+    let c = rect(json!({ "id": "r3", "angle": DEG30 }));
+    let f2 = selection_frame([&a, &c]).expect("two elements have a frame");
+    let want = element_bounds_rotated(&a)
+        .expect("bounds")
+        .union(&element_bounds_rotated(&c).expect("bounds"));
+    assert_eq!(f2.bounds, want);
+}
+
+#[test]
+fn an_empty_selection_has_no_frame() {
+    assert!(selection_frame(std::iter::empty::<&Element>()).is_none());
+}
+
+#[test]
+fn a_rotated_rectangle_dragged_by_its_corner_stays_a_rectangle() {
+    let e = rect(json!({ "angle": DEG30 }));
+    let f = selection_frame([&e]).expect("one element has a frame");
+    let before = handle_points(&f.bounds, f.angle, 1.0);
+    let se = before[Handle::Se.as_u32() as usize];
+
+    // Pull the corner 50 units along the rectangle's *own* +x axis.
+    let (dx, dy) = (50.0 * DEG30.cos(), 50.0 * DEG30.sin());
+    let r = resize_bounds(&f.bounds, f.angle, Handle::Se, se.0 + dx, se.1 + dy, false, false);
+
+    // 50 wider in its own frame, and not a hair taller.
+    close(r.width(), 150.0);
+    close(r.height(), 50.0);
+
+    // The property, not just the numbers: on screen it is still a rectangle.
+    // The opposite corner has not moved, the sides are 150 and 50 long, and
+    // they are still at right angles. Resizing in the AABB's frame fails all
+    // three — it shears the box and drags the anchor with it.
+    let after = handle_points(&r, f.angle, 1.0);
+    let (nw, ne, se2) = (after[0], after[2], after[4]);
+    close(nw.0, before[0].0);
+    close(nw.1, before[0].1);
+    close(dist(nw, ne), 150.0);
+    close(dist(ne, se2), 50.0);
+    let dot = (ne.0 - nw.0) * (se2.0 - ne.0) + (ne.1 - nw.1) * (se2.1 - ne.1);
+    close(dot, 0.0);
 }
 
 // --- resize -----------------------------------------------------------------
@@ -486,14 +612,14 @@ fn a_rotated_box_resizes_along_its_own_axes() {
     // and the returned box is in that frame, not the screen's.
     let b = Bounds::new(0.0, 0.0, 100.0, 100.0);
     let angle = std::f64::consts::FRAC_PI_2;
-    let se = handle_points(&b, angle)[Handle::Se.as_u32() as usize];
+    let se = handle_points(&b, angle, 1.0)[Handle::Se.as_u32() as usize];
     let r = resize_bounds(&b, angle, Handle::Se, se.0, se.1 + 100.0, false, false);
     close(r.width(), 200.0);
     close(r.height(), 100.0);
     // And the anchor — the NW corner — has not moved on screen, which is the
     // whole reason the arithmetic happens in the local frame.
-    let anchor_before = handle_points(&b, angle)[Handle::Nw.as_u32() as usize];
-    let anchor_after = handle_points(&r, angle)[Handle::Nw.as_u32() as usize];
+    let anchor_before = handle_points(&b, angle, 1.0)[Handle::Nw.as_u32() as usize];
+    let anchor_after = handle_points(&r, angle, 1.0)[Handle::Nw.as_u32() as usize];
     close(anchor_after.0, anchor_before.0);
     close(anchor_after.1, anchor_before.1);
 }
@@ -572,7 +698,7 @@ proptest::proptest! {
     ) {
         let b = Bounds::new(min_x, min_y, min_x + w, min_y + h);
         let handle = Handle::from_u32(which).unwrap();
-        let p = handle_points(&b, angle)[which as usize];
+        let p = handle_points(&b, angle, 1.0)[which as usize];
         for from_center in [false, true] {
             let r = resize_bounds(&b, angle, handle, p.0, p.1, false, from_center);
             proptest::prop_assert!((r.min_x - b.min_x).abs() < 1e-6, "{r:?} != {b:?}");
@@ -580,6 +706,24 @@ proptest::proptest! {
             proptest::prop_assert!((r.max_x - b.max_x).abs() < 1e-6, "{r:?} != {b:?}");
             proptest::prop_assert!((r.max_y - b.max_y).abs() < 1e-6, "{r:?} != {b:?}");
         }
+    }
+
+    /// At any angle, a corner pulled along the element's own axis changes that
+    /// dimension and leaves the other alone. This is the whole of defect two,
+    /// stated as a property: the frame the handles come from has to be the
+    /// element's own box, or one drag changes both dimensions.
+    #[test]
+    fn a_rotated_rectangle_only_grows_along_the_axis_it_was_pulled(
+        angle in 0.0f64..std::f64::consts::TAU,
+        d in -400.0f64..400.0,
+    ) {
+        let e = rect(serde_json::json!({ "angle": angle }));
+        let f = selection_frame([&e]).unwrap();
+        let se = handle_points(&f.bounds, f.angle, 1.0)[Handle::Se.as_u32() as usize];
+        let (dx, dy) = (d * angle.cos(), d * angle.sin());
+        let r = resize_bounds(&f.bounds, f.angle, Handle::Se, se.0 + dx, se.1 + dy, false, false);
+        proptest::prop_assert!((r.width() - (100.0 + d).abs()).abs() < 1e-6, "{r:?}");
+        proptest::prop_assert!((r.height() - 50.0).abs() < 1e-6, "{r:?}");
     }
 
     /// Marquee containment implies intersection, whatever the angle. The two

@@ -16,11 +16,25 @@ use serde_json::{json, Map, Value};
 use crate::binding;
 use crate::command::{Command, End};
 use crate::doc::Doc;
-use crate::geometry::{self, Bounds, Handle};
+use crate::geometry::{self, Bounds, Handle, SelectionFrame};
 use crate::scene::{Element, ElementKind};
 
-/// The box around a set of elements, by id. `None` when nothing matched or
-/// nothing had an extent.
+/// The frame a selection is described and resized in: for one element its own
+/// unrotated box plus its angle, for several the axis-aligned union.
+///
+/// This is the shape the handles are drawn from and the shape a resize works
+/// in. Using the rotated AABB instead makes a turned rectangle resize its
+/// bounding box, which shears the rectangle inside it.
+pub fn selection_frame(doc: &Doc, ids: &[String]) -> Option<SelectionFrame> {
+    let elements: Vec<&crate::scene::Element> =
+        ids.iter().filter_map(|id| doc.index_of(id)).map(|i| &doc.elements()[i]).collect();
+    geometry::selection_frame(elements)
+}
+
+/// The axis-aligned box around a set of elements, by id. `None` when nothing
+/// matched or nothing had an extent. This is the box for *containment*
+/// questions — what a marquee swept up, where to scroll to — not the frame a
+/// resize works in; see [`selection_frame`] for that.
 pub fn selection_bounds(doc: &Doc, ids: &[String]) -> Option<Bounds> {
     let mut acc: Option<Bounds> = None;
     for id in ids {
@@ -70,17 +84,12 @@ pub fn resize(
     from_center: bool,
     key: Option<&str>,
 ) -> crate::doc::Change {
-    let Some(before) = selection_bounds(doc, ids) else {
+    let Some(frame) = selection_frame(doc, ids) else {
         return doc.no_change();
     };
-    // A single rotated element resizes in its own frame; a multi-selection has
-    // no shared angle, so it resizes axis-aligned.
-    let angle = if ids.len() == 1 {
-        doc.index_of(&ids[0]).map(|i| doc.elements()[i].angle).unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    let after = geometry::resize_bounds(&before, angle, handle, px, py, lock_aspect, from_center);
+    let before = frame.bounds;
+    let after =
+        geometry::resize_bounds(&before, frame.angle, handle, px, py, lock_aspect, from_center);
 
     // A selection collapsed to nothing has no scale to give; refuse rather
     // than divide by zero and leave the drawing full of NaNs.

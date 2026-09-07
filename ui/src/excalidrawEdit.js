@@ -59,7 +59,7 @@ import { div, el } from "./dom.js";
 import { openDoc } from "./xdWasm.js";
 import {
   chromeTheme, drawElement, drawHandles, drawMarquee, drawSelectionOutline,
-  HANDLES, HANDLE_SIZE, ROTATE_OFFSET,
+  HANDLE_SIZE,
 } from "./excalidrawView.js";
 import { fontString, imageDataUrl, lineHeightPx, opacityOf } from "./excalidrawScene.js";
 import {
@@ -79,12 +79,6 @@ const AUTOSAVE_MS = 800;
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 8;
-
-/// How far above the selection box `xd-core` puts the rotate handle, in scene
-/// units (`geometry::ROTATE_HANDLE_OFFSET`). Named here because the painter
-/// measures the same handle in screen pixels and the two have to be reconciled
-/// — see `paintChrome`.
-const ROTATE_HANDLE_SCENE = 24;
 
 /// Where a paste lands relative to where it was copied from. Enough that the
 /// copy is visibly not the original, matching `duplicateSelection`'s default.
@@ -179,6 +173,14 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   let gestureSeq = 0;
   /// The rubber band, in scene coordinates, while one is being swept.
   let marquee = null;
+  /// The element index an arrow endpoint would bind to right now, or -1.
+  ///
+  /// Binding itself is the core's — `endDraft` binds both ends to whatever is
+  /// under them, and every later move re-aims the arrow, with no call from
+  /// here. What the core cannot do is *say so before it happens*, and that
+  /// promise is the whole of the feature: an arrow you are about to drop on a
+  /// box should have told you it was going to stick to it.
+  let bindTarget = -1;
   /// The properties panel, once it loads. Optional by construction — the
   /// editor works without it, which is what lets it be written in parallel.
   let panel = null;
@@ -268,6 +270,19 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   function paintChrome(ctx) {
     if (marquee) drawMarquee(ctx, marquee, { scale: camera.scale, colors });
 
+    // The shape an arrow endpoint is about to bind to. Dashed and in the guide
+    // colour rather than the accent, because it is a prediction about what is
+    // going to happen and not a statement about what is selected.
+    if (bindTarget >= 0) {
+      const box = doc.elementBounds(bindTarget);
+      if (box) {
+        drawSelectionOutline(ctx, box, {
+          scale: camera.scale, dashed: true, padding: 6, lineWidth: 2,
+          colors: { accent: colors.guide },
+        });
+      }
+    }
+
     // A shape being dragged out is not a shape you are about to resize, and
     // handles around a rectangle that is still growing read as a glitch.
     if (gesture && (gesture.kind === "draw" || gesture.kind === "freedraw")) return;
@@ -287,25 +302,18 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
     }
     drawSelectionOutline(ctx, box, { scale: camera.scale, angle, colors });
 
-    // The eight resize handles, with **no padding**. Padding would look
-    // slightly better and would be a lie: `doc.handleAt` looks for them on the
-    // box itself, and a handle drawn a few pixels away from the one you can
-    // grab is the exact bug this whole boundary exists to prevent.
-    drawHandles(ctx, box, { scale: camera.scale, angle, colors, padding: 0, only: HANDLES });
-
-    // The rotate handle is the one place the two sides measure differently:
-    // xd-core puts it a fixed 24 *scene* units above the box, and the painter
-    // puts it ROTATE_OFFSET *screen* pixels above. Rather than draw it where
-    // it is not, the box handed to the painter is stretched vertically by the
-    // difference — symmetrically, so its centre (which is what the rotation
-    // turns about) does not move. A multi-selection has no rotate handle in
-    // Excalidraw either, but xd-core will happily rotate one, so it keeps it.
-    const lift = ROTATE_HANDLE_SCENE - ROTATE_OFFSET / camera.scale;
-    drawHandles(
-      ctx,
-      { minX: box.minX, maxX: box.maxX, minY: box.minY - lift, maxY: box.maxY + lift },
-      { scale: camera.scale, angle, colors, padding: 0, only: ["rotate"] },
-    );
+    // All nine handles, with **no padding**. Padding would look slightly
+    // better and would be a lie: `doc.handleAt` looks for them on the box
+    // itself, and a handle drawn a few pixels away from the one you can grab
+    // is the exact bug this whole boundary exists to prevent.
+    //
+    // The rotate handle lands in the right place for free, because both sides
+    // now measure it the same way: `geometry::ROTATE_HANDLE_OFFSET_PX` and
+    // this file's `ROTATE_OFFSET` are the same twenty *screen* pixels, and the
+    // crate's own comment says the two are one handle. It was not always so —
+    // the crate used to place it a fixed distance in scene units, which put it
+    // six pixels above the box at 25% zoom and ninety-six at 400%.
+    drawHandles(ctx, box, { scale: camera.scale, angle, colors, padding: 0 });
   }
 
   // --- the camera ----------------------------------------------------------
@@ -546,10 +554,17 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   /// What the document says is under a screen point. Two integer round trips
   /// across the boundary and no allocation, which is what makes it cheap
   /// enough to run on every hover.
+  ///
+  /// Two screen-measured quantities go in, in different units, because the
+  /// pointer is already in scene coordinates by the time it gets here: the
+  /// grab radius divided by the zoom, and the zoom's reciprocal itself — which
+  /// is what places the rotate handle a constant distance above the box on
+  /// screen (`geometry::handle_at`). The fourth argument is harmlessly ignored
+  /// by a wrapper that does not take it yet.
   const probeAt = (x, y) => {
     const hit = doc.hitTest(x, y, HIT_SLOP / camera.scale);
     return {
-      handle: doc.handleAt(x, y, HANDLE_SIZE / camera.scale),
+      handle: doc.handleAt(x, y, HANDLE_SIZE / camera.scale, 1 / camera.scale),
       hit,
       hitSelected: hit >= 0 && doc.selection.includes(hit),
     };
@@ -595,6 +610,9 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
         break;
       case "draw":
         edited(doc.beginDraft(intent.shape, x, y, styleFor(intent.shape, style)));
+        // The draft's own id, so `bindableAt` can be told to ignore the arrow
+        // being dragged — without it every arrow binds to itself.
+        gesture.draftId = doc.elementId(doc.selection[0]) ?? "";
         reselected();
         break;
       case "freedraw":
@@ -672,6 +690,9 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
 
       case "draw":
         edited(doc.draftTo(x, y, ev.shiftKey));
+        // Only for arrows: a rectangle dragged over a box binds to nothing, so
+        // highlighting one would be a promise the core is not going to keep.
+        if (gesture.shape === "arrow") bindTarget = doc.bindableAt(x, y, gesture.draftId);
         break;
 
       case "freedraw":
@@ -698,6 +719,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
     } catch {
       // Never captured; nothing to release.
     }
+    bindTarget = -1;
     if (doc) {
       switch (g.kind) {
         case "draw":

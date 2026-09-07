@@ -31,6 +31,9 @@
 // was the original point of the file.
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
+// One WASM instance for the whole run — see the harness for why it must be
+// exactly one, and why no test may call the module's own init.
+import { openDoc as openReal } from "./wasmHarness.js";
 
 // --- a DOM, to the extent this needs one -------------------------------------
 
@@ -216,6 +219,23 @@ function fakeDoc(text) {
     elementId: (i) => list[i]?.id,
     elementBounds: (i) => (list[i] ? boxOf(list[i]) : null),
     sceneBounds: () => union(list.map((_, i) => i)),
+    /// The crate's port of excalidrawScene.js's `fitTransform`, mirrored so
+    /// the fake and the real core put the camera in the same place and the
+    /// coordinates below mean the same thing under both.
+    fitTransform: (width, height, padding = 32) => {
+      const b = union(list.map((_, i) => i));
+      const vw = Math.max(0, width - padding * 2);
+      const vh = Math.max(0, height - padding * 2);
+      if (!b || vw <= 0 || vh <= 0) return { scale: 1, offsetX: padding, offsetY: padding };
+      const w = b.maxX - b.minX;
+      const h = b.maxY - b.minY;
+      const scale = Math.min(1, w > 0 ? vw / w : Infinity, h > 0 ? vh / h : Infinity) || 1;
+      return {
+        scale,
+        offsetX: padding + (vw - w * scale) / 2 - b.minX * scale,
+        offsetY: padding + (vh - h * scale) / 2 - b.minY * scale,
+      };
+    },
     appState: () => ({ viewBackgroundColor: "#ffffff" }),
     files: () => ({}),
     toJson: () => {
@@ -233,10 +253,23 @@ function fakeDoc(text) {
       });
     },
     setNow: () => {},
-    hitTest: (x, y) => {
+    /// Excalidraw's rule, and the crate's: a shape with a background is hit
+    /// anywhere inside it, and a transparent one is hit on its stroke only —
+    /// a hollow box is a frame, and clicking through the hole in it selects
+    /// what is behind. Mirrored here rather than simplified to "inside the
+    /// box", because a fake that is easier to satisfy than the real model is a
+    /// fake that hides the bug it was written to catch.
+    hitTest: (x, y, threshold) => {
       for (let i = list.length - 1; i >= 0; i--) {
-        const b = boxOf(list[i]);
-        if (x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY) return i;
+        const e = list[i];
+        const b = boxOf(e);
+        const inside = x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY;
+        if (inside && e.backgroundColor && e.backgroundColor !== "transparent") return i;
+        const outer = x >= b.minX - threshold && x <= b.maxX + threshold
+          && y >= b.minY - threshold && y <= b.maxY + threshold;
+        const hole = x > b.minX + threshold && x < b.maxX - threshold
+          && y > b.minY + threshold && y < b.maxY - threshold;
+        if (outer && !hole) return i;
       }
       return -1;
     },
@@ -264,6 +297,7 @@ function fakeDoc(text) {
     // Nothing in these tests aims at a handle; -1 is "not on one".
     handleAt: () => -1,
     handlePoints: () => null,
+    bindableAt: () => -1,
     dragBy: (dx, dy) => {
       record();
       for (const i of selection) {
@@ -386,6 +420,14 @@ const mount = async (opts = {}) => {
 /// resolved promise chain, short enough that the 800 ms autosave has not run.
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/// A point on the fixture rectangle's left stroke.
+///
+/// Not its middle: a shape with `backgroundColor: "transparent"` is hit on its
+/// stroke only, in the real core and in the fake above. Pressing the middle of
+/// this rectangle selects nothing, which is Excalidraw's behaviour and is
+/// worth knowing about before reading the presses below.
+const ON_STROKE = [10, 40];
+
 /// The camera after `fit()` in a pane with no layout: 1:1, with
 /// `fitTransform`'s padding as the whole of the offset. So scene coordinates
 /// are screen coordinates minus 32 — and the pointer helpers below take
@@ -426,9 +468,9 @@ test("the view mounts, edits, saves, and disposes clean", async () => {
   expect(new Set(row.map((a) => a.id)).size).toBe(row.length);
 
   // A drag, in the crudest terms the contract allows: press, move, release.
-  press(wrap, 20, 20);
-  move(wrap, 60, 40);
-  lift(wrap, 60, 40);
+  press(wrap, ...ON_STROKE);
+  move(wrap, 50, 60);
+  lift(wrap, 50, 60);
 
   // The properties panel is mounted into a child of the host and refreshed
   // when the selection changes. It is the real module here, not a stub — which
@@ -477,9 +519,9 @@ test("a pending autosave is flushed by dispose, not dropped", async () => {
   // A tab closing on a debounce that has not fired yet is an edit the user
   // made and would never see again.
   const { dispose, saves, wrap } = await mount();
-  press(wrap, 20, 20);
-  move(wrap, 60, 40);
-  lift(wrap, 60, 40);
+  press(wrap, ...ON_STROKE);
+  move(wrap, 50, 60);
+  lift(wrap, 50, 60);
   expect(saves).toHaveLength(0); // still inside the 800 ms window
 
   dispose();
@@ -492,9 +534,9 @@ test("a failed serialize never reaches onSave", async () => {
   // refuses this too; the point of the test is that the view asks.
   const { saves, wrap } = await mount();
   live.__break();
-  press(wrap, 20, 20);
-  move(wrap, 60, 40);
-  lift(wrap, 60, 40);
+  press(wrap, ...ON_STROKE);
+  move(wrap, 50, 60);
+  lift(wrap, 50, 60);
   type(wrap, "s", { metaKey: true });
   await settle();
   expect(saves).toHaveLength(0);
@@ -503,8 +545,8 @@ test("a failed serialize never reaches onSave", async () => {
 test("a save that changes nothing is not written", async () => {
   const { saves, wrap } = await mount();
   // A click that selects but does not move is not an edit.
-  press(wrap, 20, 20);
-  lift(wrap, 20, 20);
+  press(wrap, ...ON_STROKE);
+  lift(wrap, ...ON_STROKE);
   type(wrap, "s", { metaKey: true });
   await settle();
   expect(saves).toHaveLength(0);
@@ -529,8 +571,8 @@ test("a file that will not open leaves a sentence, not a blank canvas", async ()
 
 test("a click selects the shape under it, and empty canvas clears", async () => {
   const { wrap } = await mount();
-  press(wrap, 20, 20);
-  lift(wrap, 20, 20);
+  press(wrap, ...ON_STROKE);
+  lift(wrap, ...ON_STROKE);
   expect(live.selection).toEqual([0]);
 
   press(wrap, 400, 400);
@@ -542,9 +584,9 @@ test("a wobble is a click, not a nudge", async () => {
   // Three pixels of trackpad slop must not move the drawing, or every attempt
   // to select something edits it.
   const { wrap, saves } = await mount();
-  press(wrap, 20, 20);
-  move(wrap, 22, 21);
-  lift(wrap, 22, 21);
+  press(wrap, ...ON_STROKE);
+  move(wrap, 12, 41);
+  lift(wrap, 12, 41);
   expect(live.element(0).x).toBe(10);
   type(wrap, "s", { metaKey: true });
   await settle();
@@ -691,8 +733,250 @@ test("undo and redo are disabled until there is something to undo", async () => 
   const { wrap, actions } = await mount();
   expect(actions().find((a) => a.id === "xd-undo").disabled).toBe(true);
   expect(actions().find((a) => a.id === "xd-redo").disabled).toBe(true);
-  press(wrap, 20, 20);
-  move(wrap, 60, 40);
-  lift(wrap, 60, 40);
+  press(wrap, ...ON_STROKE);
+  move(wrap, 50, 60);
+  lift(wrap, 50, 60);
   expect(actions().find((a) => a.id === "xd-undo").disabled).toBe(false);
+});
+
+// --- and again, against the real document model ------------------------------
+//
+// Everything above drives a fake. A fake proves the view calls what it thinks
+// it calls; it cannot prove those calls *mean* what the view thinks they mean,
+// because the fake was written by the same hand and carries the same
+// misunderstandings. So the same gestures are run again here through the real
+// `XdDoc` — the actual hit test, the actual coalescing, the actual serializer —
+// and the assertions are the ones only the real core can answer: that a seed
+// survives an edit, that undo restores the file byte-for-byte, that an arrow
+// dropped on a box binds itself.
+//
+// The fake is not redundant. It is what makes a failed serialize and a
+// hostile clipboard testable, which the real core is too well-behaved to
+// produce on demand.
+
+/// The fixture as the crate itself writes it. Derived rather than hand-typed,
+/// because `worthSaving`'s "identical is not written" rule is only meaningful
+/// against the exact bytes the serializer produces.
+const REAL_SCENE = openReal(SCENE).toJson();
+
+const mountReal = async (text = REAL_SCENE) => {
+  const { renderExcalidraw } = await import("../src/excalidrawEdit.js");
+  const host = new FakeNode("main");
+  const saves = [];
+  let actions = null;
+  const dispose = renderExcalidraw(host, text, {
+    onSave: (t) => saves.push(t),
+    onActions: (list) => { actions = list; },
+    openDocument: async (t) => (live = openReal(t)),
+  });
+  await settle();
+  return { host, dispose, saves, wrap: host.children[0], actions: () => actions };
+};
+
+/// Flush the debounce and let the save land.
+const flush = async (wrap) => {
+  type(wrap, "s", { metaKey: true });
+  await settle();
+};
+
+test("real core: opening and saving an untouched drawing writes nothing", async () => {
+  // The crate's whole round-trip promise, seen from the view: open, do
+  // nothing, and there is no diff to write. If this ever fails, every file the
+  // user opens comes back dirty.
+  const { wrap, saves, dispose } = await mountReal();
+  await flush(wrap);
+  expect(saves).toHaveLength(0);
+  dispose();
+});
+
+test("real core: a drag moves the element and leaves its seed alone", async () => {
+  // Rough.js is deterministic in the seed. A seed rewritten on edit means the
+  // hand-drawn strokes re-scramble and the whole drawing twitches on every
+  // save — the failure PLAN.md names first.
+  const { wrap, saves, dispose } = await mountReal();
+  const seedBefore = live.element(0).seed;
+
+  press(wrap, ...ON_STROKE);
+  move(wrap, 50, 60);
+  lift(wrap, 50, 60);
+  await flush(wrap);
+
+  expect(saves).toHaveLength(1);
+  const [moved] = JSON.parse(saves[0]).elements;
+  expect(moved.x).toBeCloseTo(50, 6);
+  expect(moved.y).toBeCloseTo(30, 6);
+  expect(moved.seed).toBe(seedBefore);
+  // And the bookkeeping the format's reconciliation depends on did move.
+  expect(moved.version).toBeGreaterThan(1);
+  dispose();
+});
+
+test("real core: a whole drag is one undo entry, and undo restores the bytes", async () => {
+  // Two properties at once, because they are the same property: the drag
+  // coalesces under one key, so a single ⌘Z puts the file back exactly as it
+  // was opened — which `worthSaving` then refuses to write.
+  const { wrap, saves, dispose } = await mountReal();
+  press(wrap, ...ON_STROKE);
+  for (let x = 14; x <= 70; x += 4) move(wrap, x, 40);
+  lift(wrap, 70, 40);
+  // The drag really happened — without this the test would pass just as well
+  // on a press that missed and swept a marquee instead.
+  expect(live.element(0).x).toBeCloseTo(70, 6);
+
+  type(wrap, "z", { metaKey: true });
+  expect(live.toJson()).toBe(REAL_SCENE);
+  expect(live.canUndo()).toBe(false); // one entry, not fifteen
+
+  await flush(wrap);
+  expect(saves).toHaveLength(0);
+  dispose();
+});
+
+test("real core: the hit test picks the shape, and empty canvas deselects", async () => {
+  const { wrap, dispose } = await mountReal();
+  press(wrap, ...ON_STROKE);
+  lift(wrap, ...ON_STROKE);
+  expect(live.selection).toEqual([0]);
+
+  // The middle of a transparent rectangle is a hole, not the shape.
+  press(wrap, 60, 40);
+  lift(wrap, 60, 40);
+  expect(live.selection).toEqual([]);
+
+  press(wrap, 500, 500);
+  lift(wrap, 500, 500);
+  expect(live.selection).toEqual([]);
+  dispose();
+});
+
+test("real core: drawing a rectangle produces a whole Excalidraw element", async () => {
+  const { wrap, saves, dispose } = await mountReal();
+  type(wrap, "r");
+  press(wrap, 200, 200);
+  move(wrap, 320, 280);
+  lift(wrap, 320, 280);
+  await flush(wrap);
+
+  const drawn = JSON.parse(saves[0]).elements.at(-1);
+  expect(drawn.type).toBe("rectangle");
+  expect(drawn.width).toBeCloseTo(120, 6);
+  expect(drawn.height).toBeCloseTo(80, 6);
+  // Identity is the document's to hand out, not the view's.
+  expect(typeof drawn.id).toBe("string");
+  expect(drawn.seed).not.toBe(0);
+  // And the style the view asked for arrived intact.
+  expect(drawn.strokeWidth).toBe(2);
+  expect(drawn.roundness).toEqual({ type: 3 });
+  dispose();
+});
+
+test("real core: a click with a shape tool draws nothing at all", async () => {
+  // `endDraft`'s minimum size. A zero-by-zero rectangle would be an element
+  // the user can neither see nor select in order to delete.
+  const { wrap, dispose } = await mountReal();
+  const before = live.length;
+  type(wrap, "r");
+  press(wrap, 200, 200);
+  lift(wrap, 200, 200);
+  expect(live.length).toBe(before);
+  dispose();
+});
+
+test("real core: an arrow dropped on a shape binds itself", async () => {
+  // Binding is the core's and happens inside endDraft with no call from the
+  // view. What the view owes is the highlight beforehand, and the coordinates
+  // that put the endpoint inside the box.
+  const { wrap, dispose } = await mountReal();
+  type(wrap, "a");
+  press(wrap, 200, 40);   // clear of the rectangle at 10,10 100x60
+  move(wrap, 60, 40);     // and into the middle of it
+  lift(wrap, 60, 40);
+
+  const arrow = live.element(live.length - 1);
+  expect(arrow.type).toBe("arrow");
+  expect(live.isBound(arrow.id, true)).toBe(true);
+  dispose();
+});
+
+test("real core: the binding highlight names the shape before the drop", async () => {
+  const { wrap, dispose } = await mountReal();
+  type(wrap, "a");
+  press(wrap, 200, 40);
+  move(wrap, 60, 40);
+  // Mid-drag, the core already knows what the endpoint would stick to — which
+  // is what the view draws an outline around.
+  const draftId = live.elementId(live.selection[0]);
+  expect(live.bindableAt(60, 40, draftId)).toBe(0);
+  lift(wrap, 60, 40);
+  dispose();
+});
+
+test("real core: text typed into the overlay lands as a text element", async () => {
+  const { wrap, saves, dispose } = await mountReal();
+  dbl(wrap, 300, 300);
+  const overlay = wrap.children.find((c) => c.tagName === "TEXTAREA");
+  overlay.value = "hello";
+  overlay.dispatch("keydown", { key: "Escape" });
+  await flush(wrap);
+
+  const text = JSON.parse(saves[0]).elements.at(-1);
+  expect(text.type).toBe("text");
+  expect(text.text).toBe("hello");
+  expect(text.originalText).toBe("hello");
+  expect(text.fontSize).toBe(20);
+  expect(Number.isFinite(text.width)).toBe(true);
+  dispose();
+});
+
+test("real core: z-order, grouping and duplication go through unedited", async () => {
+  const { wrap, saves, dispose } = await mountReal();
+  type(wrap, "a", { metaKey: true });
+  type(wrap, "d", { metaKey: true });      // duplicate
+  type(wrap, "a", { metaKey: true });
+  type(wrap, "g", { metaKey: true });      // group
+  type(wrap, "[", { metaKey: true, shiftKey: true }); // send to back
+  await flush(wrap);
+
+  const { elements } = JSON.parse(saves[0]);
+  expect(elements).toHaveLength(2);
+  // Grouping is a shared group id on every member, which is how Excalidraw
+  // spells it — nothing structural.
+  const groups = elements.map((e) => e.groupIds?.[0]);
+  expect(groups[0]).toBeTruthy();
+  expect(groups[0]).toBe(groups[1]);
+  dispose();
+});
+
+test("real core: pasting our own clipboard payload round-trips", async () => {
+  const { wrap, dispose } = await mountReal();
+  type(wrap, "a", { metaKey: true });
+  const board = new Map();
+  const clipboardData = {
+    setData: (k, v) => board.set(k, v),
+    getData: (k) => board.get(k) ?? "",
+  };
+  wrap.dispatch("copy", { clipboardData });
+  wrap.dispatch("paste", { clipboardData });
+
+  expect(live.length).toBe(2);
+  const [original, pasted] = [live.element(0), live.element(1)];
+  expect(pasted.type).toBe(original.type);
+  // A fresh identity, because the document hands identity out and a duplicate
+  // sharing a seed would be stroke-for-stroke identical.
+  expect(pasted.id).not.toBe(original.id);
+  expect(pasted.seed).not.toBe(original.seed);
+  dispose();
+});
+
+test("real core: the view disposes clean with a real document behind it", async () => {
+  const { host, dispose, wrap } = await mountReal();
+  press(wrap, ...ON_STROKE);
+  move(wrap, 50, 60);
+  lift(wrap, 50, 60);
+  dispose();
+  await settle();
+  for (const [where, count] of ledger) expect([where, count]).toEqual([where, 0]);
+  expect(host.children).toHaveLength(0);
+  expect(observers).toBe(0);
+  expect(frames.size).toBe(0);
 });

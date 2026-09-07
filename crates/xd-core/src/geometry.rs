@@ -510,12 +510,76 @@ pub fn marquee_hits(elements: &[Element], area: &Bounds, contain: bool) -> Vec<u
 
 // --- handles and transforms -------------------------------------------------
 
-/// How far above the top edge the rotation handle sits, in scene units.
+/// How far above the top edge the rotation handle sits, in **screen pixels**.
 ///
-/// A constant rather than a function of zoom because this crate has no view: a
-/// caller drawing at a scale other than 1:1 divides by its own zoom on the way
-/// out. Exported so the painter and the hit test cannot pick different numbers.
-pub const ROTATE_HANDLE_OFFSET: f64 = 24.0;
+/// Screen pixels, not scene units, and the `_PX` is load-bearing: a constant in
+/// scene units is a handle that sits six pixels above the box at 25% zoom and
+/// ninety-six at 400%, which is a handle you cannot reliably grab. Every other
+/// measurement in this section is screen-measured for the same reason — the
+/// grab radius, the handle size the painter draws — so this one has to be too.
+///
+/// The value matches `ROTATE_OFFSET` in `excalidrawView.js`. The two are the
+/// same handle; if they ever disagree, you can grab a handle where none is
+/// drawn.
+pub const ROTATE_HANDLE_OFFSET_PX: f64 = 20.0;
+
+/// Scene units per screen pixel — the reciprocal of the zoom — sanitised.
+///
+/// A zero or a NaN here would drop the rotate handle onto the north handle and
+/// make the two one ambiguous target, so a nonsense scale is read as 1:1.
+fn scene_per_px(v: f64) -> f64 {
+    if v.is_finite() && v > 0.0 {
+        v
+    } else {
+        1.0
+    }
+}
+
+/// The box a selection's handles belong on, and the angle to draw it at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionFrame {
+    pub bounds: Bounds,
+    pub angle: f64,
+}
+
+/// The frame for a selection: which box the handles are computed from.
+///
+/// This is the decomposition, and getting it wrong is subtle because the wrong
+/// answer still looks self-consistent on screen. A **single** element is its
+/// own *unrotated* box plus its own angle — the box it is written down as, and
+/// the frame [`resize_bounds`] returns its answer in — so dragging a corner
+/// changes the element's width and height and nothing else. Take the rotated
+/// AABB instead and the handles no longer sit on the shape's own edges: a
+/// rectangle turned 30° and dragged by its corner resizes its bounding box,
+/// which shears the rectangle inside it. Excalidraw resizes in the element's
+/// own frame, and so does a user's expectation — they dragged the corner of a
+/// rectangle, so a rectangle is what should change size.
+///
+/// A **multi**-selection has no shared angle to work in, so it falls back to
+/// the axis-aligned union of the rotated boxes and an angle of zero. That is
+/// also why Excalidraw shows no rotate handle on one, though this crate will
+/// happily rotate it if asked.
+pub fn selection_frame<'a>(
+    elements: impl IntoIterator<Item = &'a Element>,
+) -> Option<SelectionFrame> {
+    let mut it = elements.into_iter();
+    let first = it.next()?;
+    let Some(second) = it.next() else {
+        let bounds = element_bounds(first)?;
+        return Some(SelectionFrame { bounds, angle: num(first.angle, 0.0) });
+    };
+    let pair = [element_bounds_rotated(first), element_bounds_rotated(second)];
+    let mut acc = union_all(pair.into_iter().flatten());
+    for e in it {
+        if let Some(b) = element_bounds_rotated(e) {
+            acc = Some(match acc {
+                Some(a) => a.union(&b),
+                None => b,
+            });
+        }
+    }
+    Some(SelectionFrame { bounds: acc?, angle: 0.0 })
+}
 
 /// The eight resize handles and the rotation handle, in the order
 /// [`handle_points`] returns them: clockwise from the top-left corner, then
@@ -589,9 +653,15 @@ impl Handle {
 /// The handles rotate with the selection, which is the whole reason this takes
 /// an angle: a rotated shape whose handles stayed axis-aligned would resize
 /// along the wrong axes, and the user would be dragging a box that isn't the
-/// one they can see.
-pub fn handle_points(b: &Bounds, angle: f64) -> [(f64, f64); 9] {
+/// one they can see. Pass the box from [`selection_frame`], not a rotated AABB.
+///
+/// `scene_per_px` is the reciprocal of the zoom, and it exists for exactly one
+/// position: the rotate handle floats a constant distance above the box *on
+/// screen*, so the distance in scene units depends on how far the caller is
+/// zoomed in. The other eight sit on the box and need no scale at all.
+pub fn handle_points(b: &Bounds, angle: f64, scene_per_px: f64) -> [(f64, f64); 9] {
     let (cx, cy) = b.center();
+    let lift = ROTATE_HANDLE_OFFSET_PX * self::scene_per_px(scene_per_px);
     let mut pts = [
         (b.min_x, b.min_y),
         (cx, b.min_y),
@@ -601,7 +671,7 @@ pub fn handle_points(b: &Bounds, angle: f64) -> [(f64, f64); 9] {
         (cx, b.max_y),
         (b.min_x, b.max_y),
         (b.min_x, cy),
-        (cx, b.min_y - ROTATE_HANDLE_OFFSET),
+        (cx, b.min_y - lift),
     ];
     if angle != 0.0 {
         for p in pts.iter_mut() {
@@ -613,11 +683,24 @@ pub fn handle_points(b: &Bounds, angle: f64) -> [(f64, f64); 9] {
 
 /// The handle within `radius` of `(x, y)`, or `None`.
 ///
+/// `radius` is in scene units — the caller already divides its screen-pixel
+/// grab size by the zoom — while `scene_per_px` places the rotate handle, as
+/// in [`handle_points`]. Both are screen-measured quantities arriving in
+/// different units because the pointer is in scene coordinates by the time it
+/// gets here.
+///
 /// Rotate is checked first and wins outright. On a small selection its circle
 /// overlaps the north handle, and if the nearest-handle rule decided it there
 /// would be shapes in a real drawing that simply cannot be rotated.
-pub fn handle_at(b: &Bounds, angle: f64, x: f64, y: f64, radius: f64) -> Option<Handle> {
-    let pts = handle_points(b, angle);
+pub fn handle_at(
+    b: &Bounds,
+    angle: f64,
+    x: f64,
+    y: f64,
+    radius: f64,
+    scene_per_px: f64,
+) -> Option<Handle> {
+    let pts = handle_points(b, angle, scene_per_px);
     let r2 = radius * radius;
     let d2 = |p: (f64, f64)| (x - p.0).powi(2) + (y - p.1).powi(2);
     if d2(pts[8]) <= r2 {

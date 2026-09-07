@@ -358,24 +358,30 @@ export class XdDoc {
     /**
      * The resize/rotate handle under a point, as a `Handle` discriminant, or
      * -1. An integer, not a string: this runs on every hover.
+     * `scene_per_px` is the reciprocal of the zoom. The rotate handle sits a
+     * fixed distance above the box *on screen*, so it needs to know how big a
+     * screen pixel currently is in scene units — otherwise the handle is
+     * unreachable zoomed out and miles away zoomed in.
      * @param {number} x
      * @param {number} y
      * @param {number} radius
+     * @param {number} scene_per_px
      * @returns {number}
      */
-    handleAt(x, y, radius) {
-        const ret = wasm.xddoc_handleAt(this.__wbg_ptr, x, y, radius);
+    handleAt(x, y, radius, scene_per_px) {
+        const ret = wasm.xddoc_handleAt(this.__wbg_ptr, x, y, radius, scene_per_px);
         return ret;
     }
     /**
      * The nine handle positions as `[x0, y0, x1, y1, …]` in `Handle` order,
      * for the painter.
+     * @param {number} scene_per_px
      * @returns {Float64Array | undefined}
      */
-    handlePoints() {
+    handlePoints(scene_per_px) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.xddoc_handlePoints(retptr, this.__wbg_ptr);
+            wasm.xddoc_handlePoints(retptr, this.__wbg_ptr, scene_per_px);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             let v1;
@@ -598,6 +604,9 @@ export class XdDoc {
         return ret;
     }
     /**
+     * The box the selection's handles are drawn on: one element's own
+     * unrotated box, or the axis-aligned union of several. Paired with
+     * `selectionAngle`, which says how to turn it.
      * @returns {Float64Array | undefined}
      */
     selectionBounds() {

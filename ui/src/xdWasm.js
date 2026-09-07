@@ -131,10 +131,14 @@ export function wrap(inner) {
     toggleSelection: (i) => inner.toggleSelection(i),
     selectAll: () => inner.selectAll(),
     clearSelection: () => inner.clearSelection(),
-    handleAt: (x, y, radius) => inner.handleAt(x, y, radius),
+    /// `scenePerPx` is the reciprocal of the zoom. The rotate handle sits a
+    /// fixed distance above the selection *on screen*, so the model has to
+    /// know how big a screen pixel currently is in scene units — otherwise the
+    /// handle drifts out of reach as the drawing is zoomed.
+    handleAt: (x, y, radius, scenePerPx = 1) => inner.handleAt(x, y, radius, scenePerPx),
     /// The nine handles as [{ x, y }], or null when nothing is selected.
-    handlePoints: () => {
-      const flat = inner.handlePoints();
+    handlePoints: (scenePerPx = 1) => {
+      const flat = inner.handlePoints(scenePerPx);
       if (!flat) return null;
       const out = [];
       for (let i = 0; i < flat.length; i += 2) out.push({ x: flat[i], y: flat[i + 1] });

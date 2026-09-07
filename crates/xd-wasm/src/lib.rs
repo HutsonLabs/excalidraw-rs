@@ -228,9 +228,12 @@ impl XdDoc {
             .collect()
     }
 
+    /// The box the selection's handles are drawn on: one element's own
+    /// unrotated box, or the axis-aligned union of several. Paired with
+    /// `selectionAngle`, which says how to turn it.
     #[wasm_bindgen(js_name = selectionBounds)]
     pub fn selection_bounds(&self) -> Option<Vec<f64>> {
-        ops::selection_bounds(&self.doc, &self.selection).map(|b| b.to_array().to_vec())
+        ops::selection_frame(&self.doc, &self.selection).map(|f| f.bounds.to_array().to_vec())
     }
 
     /// The selection's shared rotation, or 0 when several elements are
@@ -238,13 +241,7 @@ impl XdDoc {
     /// axis-aligned for the same reason.
     #[wasm_bindgen(js_name = selectionAngle)]
     pub fn selection_angle(&self) -> f64 {
-        if self.selection.len() != 1 {
-            return 0.0;
-        }
-        self.doc
-            .index_of(&self.selection[0])
-            .map(|i| self.doc.elements()[i].angle)
-            .unwrap_or(0.0)
+        ops::selection_frame(&self.doc, &self.selection).map(|f| f.angle).unwrap_or(0.0)
     }
 
     #[wasm_bindgen(js_name = setSelection)]
@@ -285,10 +282,14 @@ impl XdDoc {
 
     /// The resize/rotate handle under a point, as a `Handle` discriminant, or
     /// -1. An integer, not a string: this runs on every hover.
+    /// `scene_per_px` is the reciprocal of the zoom. The rotate handle sits a
+    /// fixed distance above the box *on screen*, so it needs to know how big a
+    /// screen pixel currently is in scene units — otherwise the handle is
+    /// unreachable zoomed out and miles away zoomed in.
     #[wasm_bindgen(js_name = handleAt)]
-    pub fn handle_at(&self, x: f64, y: f64, radius: f64) -> i32 {
-        let Some(b) = ops::selection_bounds(&self.doc, &self.selection) else { return -1 };
-        geometry::handle_at(&b, self.selection_angle(), x, y, radius)
+    pub fn handle_at(&self, x: f64, y: f64, radius: f64, scene_per_px: f64) -> i32 {
+        let Some(f) = ops::selection_frame(&self.doc, &self.selection) else { return -1 };
+        geometry::handle_at(&f.bounds, f.angle, x, y, radius, scene_per_px)
             .map(|h| h.as_u32() as i32)
             .unwrap_or(-1)
     }
@@ -296,9 +297,9 @@ impl XdDoc {
     /// The nine handle positions as `[x0, y0, x1, y1, …]` in `Handle` order,
     /// for the painter.
     #[wasm_bindgen(js_name = handlePoints)]
-    pub fn handle_points(&self) -> Option<Vec<f64>> {
-        let b = ops::selection_bounds(&self.doc, &self.selection)?;
-        let pts = geometry::handle_points(&b, self.selection_angle());
+    pub fn handle_points(&self, scene_per_px: f64) -> Option<Vec<f64>> {
+        let f = ops::selection_frame(&self.doc, &self.selection)?;
+        let pts = geometry::handle_points(&f.bounds, f.angle, scene_per_px);
         Some(pts.iter().flat_map(|(x, y)| [*x, *y]).collect())
     }
 
