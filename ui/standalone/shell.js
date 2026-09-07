@@ -17,10 +17,7 @@
 // scripts/check-imports.mjs enforces that; see its header for why the rule
 // needed mechanising rather than remembering.
 
-import { div } from "../src/dom.js";
 import { renderActions } from "../src/viewActions.js";
-import { parseScene } from "../src/excalidrawScene.js";
-import { renderExcalidrawCanvas } from "../src/excalidrawView.js";
 import { renderExcalidraw } from "../src/excalidrawEdit.js";
 import {
   basename, chooseOpenPath, chooseSavePath, emptyScene, installShortcuts,
@@ -30,42 +27,18 @@ import { exportActions } from "./export.js";
 
 // --- the mount ---------------------------------------------------------------
 //
-// One binding, and it is the seam. It now points at the editor, and that swap
-// was the whole of the change to this file — which is the point of having
-// written the adapter below to the *editor's* contract rather than to the
-// painter's. The call shape `mountView(host, text, { onSave, onActions })`
-// returning a dispose function is Phase 5's contract, and it was already what
-// the rest of this file called.
+// One binding, and it is the seam. Swapping it from a read-only adapter to the
+// editor was the whole of the change this file needed when excalidrawEdit.js
+// landed, which is the point of having written that adapter to the *editor's*
+// contract rather than to the painter's: the call shape
+// `mountView(host, text, { onSave, onActions })` returning a dispose function
+// is Phase 5's contract, and it was already what the rest of this file called.
 //
-// The adapter is kept, unreferenced, as the read-only fallback: it is the
-// thing to point this binding back at if the WASM core ever fails to build,
-// and it is a working demonstration that the seam takes either side.
+// The adapter is gone rather than kept as a fallback. Dead code that shadows a
+// live path is worse than no code — it invites someone to fix a bug in the
+// copy nothing runs. `excalidrawView.js` still exports `renderExcalidrawCanvas`
+// for anyone who wants a viewer, and git has the twenty lines that adapted it.
 const mountView = renderExcalidraw;
-
-/// The read-only adapter. Takes the editor's arguments and drives the viewer
-/// with them.
-///
-/// Two things it does *not* do, both on purpose:
-///
-/// `onSave` is accepted and never called. The painter cannot edit, so there is
-/// nothing to save, and inventing a save path here would mean writing one that
-/// the editor then has to replace. A document opened today is never dirty.
-///
-/// A file that doesn't parse gets a sentence in the pane, not a blank canvas.
-/// That distinction is the same one bpmnView.js makes and for the same reason:
-/// a blank canvas over a file we failed to read is one stray keystroke away
-/// from overwriting a real drawing with nothing.
-function mountReadOnlyPainter(host, text, { onSave, onActions } = {}) {
-  void onSave;
-  const parsed = parseScene(text);
-  if (!parsed.ok) {
-    const note = div("preview-note err", parsed.error);
-    host.appendChild(note);
-    onActions?.([]);
-    return () => note.remove();
-  }
-  return renderExcalidrawCanvas(host, parsed, { onActions });
-}
 
 // --- the document ------------------------------------------------------------
 
