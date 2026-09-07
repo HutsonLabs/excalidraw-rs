@@ -19,3 +19,19 @@ getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+# wasm-pack ships its own wasm-opt (117), which validates against a baseline
+# WebAssembly that current rustc has already moved past — it emits memory.copy
+# and sign extensions unconditionally. Without these flags the optimiser
+# refuses the module it was handed, so the vendored artifact would silently be
+# the unoptimised one. The features named here are all in the 2022 baseline
+# every browser we target has shipped for years.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+  "-Oz",
+  "--enable-bulk-memory",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+  "--enable-nontrapping-float-to-int",
+  "--enable-reference-types",
+]

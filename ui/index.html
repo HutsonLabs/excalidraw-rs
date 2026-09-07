@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>excalidraw-rs</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Tints the browser chrome above the window to the titlebar's own color,
+         so there is no light seam over the app's. -->
+    <meta name="theme-color" content="#1e1e22" />
+    <script>
+      // Decided before the stylesheet is applied, and deliberately inline: the
+      // titlebar reserves a strip on the left for macOS' traffic lights
+      // (tauri.conf.json puts them at x:16, y:20 under titleBarStyle:
+      // "Overlay", which means they float over our own chrome and we owe them
+      // the room). Outside Tauri — a plain browser opening ui/ off disk, which
+      // is how the painter gets exercised without building the app — there are
+      // no window controls at all and the strip is dead space.
+      //
+      // withGlobalTauri injects __TAURI__ before any page script runs, so this
+      // is decidable synchronously, before first paint, with no flash of
+      // wrongly-padded chrome. Same trick, and the same class name, as
+      // term.hut's index.html.
+      if (!window.__TAURI__) document.documentElement.classList.add("web");
+
+      // The last resort. shell.js reports the failures it can see, but a
+      // module that fails to parse or to resolve never runs, so its own
+      // handler never installs — and the whole window is blank with the
+      // reason only in a console the user has no reason to open. A drawing
+      // app that shows nothing is indistinguishable from a drawing app that
+      // lost the drawing, which is the fear this exists to answer.
+      (() => {
+        let shown = false;
+        const report = (what) => {
+          if (shown) return;
+          shown = true;
+          const say = () => {
+            const host = document.getElementById("host");
+            if (!host) return;
+            const note = document.createElement("div");
+            note.className = "boot-error";
+            note.textContent = `excalidraw-rs couldn't start: ${what}`;
+            host.replaceChildren(note);
+          };
+          if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", say, { once: true });
+          } else {
+            say();
+          }
+        };
+        addEventListener("error", (ev) => {
+          // A failed <script>/<link> load reports its element, not a message.
+          const src = ev.target?.src ?? ev.target?.href;
+          report(src ? `${src} didn't load` : ev.message || "an unknown error");
+        }, true);
+        addEventListener("unhandledrejection", (ev) =>
+          report(String(ev.reason?.message ?? ev.reason ?? "an unknown error")));
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- The whole of the app's chrome. One row: what the document is called on
+         the left, and whatever the mounted view wants to contribute on the
+         right. The view builds no bar of its own — same discipline as
+         term.hut's pane header, and the reason the port is a copy rather than
+         an unpicking (see viewActions.js). -->
+    <header id="titlebar">
+      <div id="doc">
+        <!-- Both filled by textContent from shell.js; never innerHTML. -->
+        <span id="doc-name">Untitled</span>
+        <!-- The dirty marker. A dot rather than a word, because it changes on
+             every keystroke and a word that flickers is noise. -->
+        <span id="doc-dirty" hidden aria-hidden="true">●</span>
+      </div>
+      <!-- viewActions.js paints into this and diffs by id, so the view may
+           republish on every frame (it does, for the zoom readout) without
+           churning the DOM or dropping the button the pointer is over. -->
+      <div id="view-actions" hidden></div>
+    </header>
+
+    <!-- One full-bleed host, and the view owns everything inside it. The
+         editor is handed this element and may not touch anything outside it —
+         that rule is what Phase 5's import allowlist mechanises, and this is
+         the element the rule is about. -->
+    <main id="host"></main>
+
+    <script type="module" src="standalone/shell.js"></script>
+  </body>
+</html>
