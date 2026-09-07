@@ -1,0 +1,189 @@
+/* The properties island (excalidrawProps.js).
+ *
+ * It lives beside the module rather than in the app's stylesheet for the same
+ * reason the module lives in ui/src/ rather than ui/standalone/: at PLAN.md
+ * Phase 8 the panel is lifted into term.hut as a copy, and a copy of two files
+ * is a port. A block of rules merged into styles.css would be a diff against a
+ * stylesheet term.hut already owns — which is the sort of thing that turns a
+ * copy into an afternoon.
+ *
+ * Every colour here is a token, never a literal. --panel/--surface,
+ * --fg/--text, --border, --subtext and --accent all exist on both sides of the
+ * port (see the header of ui/styles.css, which says why the two spellings
+ * resolve to one value), so the island arrives in term.hut already wearing its
+ * host's colours. The only hard-coded colours in this file are the two greys
+ * of the transparency checkerboard, which are a *pattern* and not a theme.
+ */
+
+/* Positioned against the nearest positioned ancestor, which is the view's own
+ * .xd-wrap. Absolute rather than fixed: the island belongs to the canvas, and
+ * in term.hut the canvas is a pane inside a window, not the window. */
+.xdp-island {
+  position: absolute;
+  z-index: 4;
+  top: 0.75rem;
+  left: 0.75rem;
+  /* Tall enough to hold ten rows, and scrolls rather than growing past the
+     canvas on a short window — a panel taller than the viewport hides its own
+     bottom controls with no way to reach them. */
+  max-height: calc(100% - 1.5rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding: 0.75rem;
+  width: 12.5rem;
+  box-sizing: border-box;
+
+  background: var(--panel, var(--surface));
+  color: var(--fg, var(--text));
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  box-shadow: 0 0.25rem 1rem hsla(0, 0%, 0%, 0.28);
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+
+  /* Fading rather than appearing is the difference between "a panel opened"
+     and "something flashed". Reduced motion turns it off below. */
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.xdp-title {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--subtext);
+}
+
+.xdp-group { display: flex; flex-direction: column; gap: 0.25rem; }
+
+/* The fill group is absent, not merely invisible, when the background is
+   transparent — and `hidden` on a flex child needs saying, because
+   `display: flex` above wins over the UA's `[hidden] { display: none }`. */
+.xdp-group[hidden] { display: none; }
+
+.xdp-label {
+  font-size: 0.6875rem;
+  color: var(--subtext);
+}
+
+.xdp-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+/* --- Buttons ---------------------------------------------------------------
+ *
+ * One skin for the icon buttons and one for the swatches. Both are 1.75rem
+ * squares: a row of eight of them has to fit a 12.5rem panel, and a target
+ * smaller than about 28px is one people miss.
+ */
+
+.xdp-btn,
+.xdp-swatch {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 0.3125rem;
+  background: transparent;
+  color: var(--subtext);
+  font: inherit;
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+
+.xdp-btn svg { display: block; }
+
+.xdp-btn:hover { background: var(--bg-alt); color: var(--fg, var(--text)); }
+
+/* The pressed state is carried twice on purpose: `aria-pressed` for the
+   screen reader, `.on` for the eye. Selecting on the attribute as well means a
+   button that somehow got one without the other still looks right rather than
+   lying silently. */
+.xdp-btn.on,
+.xdp-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--fg, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* --- Swatches --------------------------------------------------------------- */
+
+.xdp-swatch {
+  width: 1.375rem;
+  height: 1.375rem;
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+}
+
+/* The selected colour is marked with a ring *outside* the swatch rather than a
+   tick inside it. A checkmark over a dark swatch is invisible, and over a
+   light one it changes what colour the swatch appears to be — which is the one
+   thing a colour swatch may not do. */
+.xdp-swatch.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Transparent, and the custom swatch before a colour has been chosen: the
+   conventional checkerboard. Fixed greys because this is a pattern standing
+   for "nothing here", not a themed surface. */
+.xdp-none {
+  background-image: repeating-conic-gradient(
+    hsl(0, 0%, 42%) 0% 25%, hsl(0, 0%, 25%) 0% 50%);
+  background-size: 0.5rem 0.5rem;
+}
+
+/* A hairline gap between the presets and the custom entry, so the row reads as
+   "five colours, then something else" rather than six colours one of which
+   behaves differently. */
+.xdp-sep {
+  flex: none;
+  width: 1px;
+  height: 1rem;
+  margin: 0 0.125rem;
+  background: var(--border);
+}
+
+/* The custom swatch is the only one whose colour is not known in advance, so
+   it is the only one that needs to say "there is more here" when it is empty. */
+.xdp-custom { position: relative; }
+
+.xdp-custom::after {
+  content: "";
+  position: absolute;
+  right: -0.0625rem;
+  bottom: -0.0625rem;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 0.125rem 0 0.1875rem 0;
+  background: var(--accent);
+}
+
+/* --- Opacity ---------------------------------------------------------------- */
+
+.xdp-range {
+  flex: 1;
+  min-width: 0;
+  height: 1.25rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* --- Motion ----------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .xdp-island { transition: none; }
+}
