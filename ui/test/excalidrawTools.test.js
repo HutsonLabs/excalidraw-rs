@@ -13,8 +13,8 @@
 
 import { test, expect } from "bun:test";
 import {
-  afterDraw, cursorFor, isPressureDevice, keyIntent, newToolState, passedThreshold,
-  pointerIntent, pressureOf, toolForKey, toolLabel, wheelIntent,
+  afterDraw, cursorFor, handlesCollapsed, isPressureDevice, keyIntent, newToolState,
+  passedThreshold, pointerIntent, pressureOf, toolForKey, toolLabel, wheelIntent,
   DRAG_THRESHOLD, HANDLE, NUDGE, NUDGE_FAST, REORDER, ROTATE_SNAP, TOOLS,
 } from "../src/excalidrawTools.js";
 
@@ -44,8 +44,24 @@ test("the shortcuts are Excalidraw's, letters and digits both", () => {
   expect(toolForKey("Enter")).toBe(null);
 });
 
+test("freedraw answers to X as well as P, the way Excalidraw's does", () => {
+  // Upstream is `letterKey: [KEYS.P, KEYS.X]`, and both spellings are in the
+  // wild — P for pencil, X for where the button sits.
+  expect(toolForKey("x")).toBe("freedraw");
+  expect(toolForKey("X")).toBe("freedraw");
+  expect(toolForKey("p")).toBe("freedraw");
+});
+
+test("the eraser is a tool, on E and on 0", () => {
+  expect(toolForKey("e")).toBe("eraser");
+  expect(toolForKey("0")).toBe("eraser");
+  // It draws nothing, which is what `shape: null` says — the same thing the
+  // hand tool says about itself.
+  expect(TOOLS.find((t) => t.id === "eraser").shape).toBe(null);
+});
+
 test("every tool has a distinct key and a distinct digit", () => {
-  const keys = TOOLS.map((t) => t.key);
+  const keys = TOOLS.flatMap((t) => [t.key, t.alias].filter(Boolean));
   expect(new Set(keys).size).toBe(keys.length);
   const digits = TOOLS.map((t) => t.digit).filter(Boolean);
   expect(new Set(digits).size).toBe(digits.length);
@@ -91,10 +107,95 @@ test("a press on an already-selected shape says so, so the set drags together", 
 });
 
 test("empty canvas sweeps a marquee, and shift adds to what is selected", () => {
-  expect(pointerIntent(at("select"), down(), empty)).toEqual({ kind: "marquee", extend: false });
-  expect(pointerIntent(at("select"), down({ shiftKey: true }), empty)).toEqual({
-    kind: "marquee", extend: true,
+  expect(pointerIntent(at("select"), down(), empty)).toEqual({
+    kind: "marquee", extend: false, contain: false,
   });
+  expect(pointerIntent(at("select"), down({ shiftKey: true }), empty)).toEqual({
+    kind: "marquee", extend: true, contain: false,
+  });
+});
+
+test("alt narrows the marquee to what it encloses", () => {
+  // `marquee(..., contain)` has been plumbed through xd-core and the boundary
+  // since Phase 2 and nothing ever passed anything but false.
+  expect(pointerIntent(at("select"), down({ altKey: true }), empty).contain).toBe(true);
+  expect(pointerIntent(at("select"), down({ altKey: true, shiftKey: true }), empty)).toEqual({
+    kind: "marquee", extend: true, contain: true,
+  });
+});
+
+test("a handle that has closed over its own element loses to a move", () => {
+  // At 50% zoom the grab radius is 16 scene units, so a 25-unit-tall text
+  // element sits inside its own N and S handles: the second press of a
+  // double-click read as a resize, and one pixel of jitter rescaled the font.
+  const tiny = { minX: 0, minY: 0, maxX: 100, maxY: 25 };
+  const probe = { handle: HANDLE.S, hit: 0, hitSelected: true, box: tiny, handleRadius: 16 };
+  expect(pointerIntent(at("select"), down(), probe)).toEqual({
+    kind: "move", index: 0, extend: false, selected: true,
+  });
+  // And the cursor agrees, or it promises a resize the click will not do.
+  expect(cursorFor(at("select"), probe)).toBe("move");
+});
+
+test("a handle grabbed off the body still resizes, however small the element", () => {
+  // Otherwise a small shape could not be resized at all, which would be a worse
+  // bug than the one the rule above fixes.
+  const tiny = { minX: 0, minY: 0, maxX: 100, maxY: 25 };
+  const probe = { handle: HANDLE.S, hit: -1, hitSelected: false, box: tiny, handleRadius: 16 };
+  expect(pointerIntent(at("select"), down(), probe)).toEqual({ kind: "resize", handle: HANDLE.S });
+});
+
+test("the collapse rule needs both a box and a radius to fire", () => {
+  const box = { minX: 0, minY: 0, maxX: 100, maxY: 25 };
+  expect(handlesCollapsed(box, 16)).toBe(true); // 25 < 3 × 16
+  expect(handlesCollapsed(box, 4)).toBe(false); // 25 > 3 × 4
+  // A caller that measured nothing gets the plain handle-beats-shape rule.
+  expect(handlesCollapsed(null, 16)).toBe(false);
+  expect(handlesCollapsed(box, 0)).toBe(false);
+});
+
+test("the text tool types into text that is already there", () => {
+  // It used to return `text` before any hit test ran, so clicking a text
+  // element with the text tool stacked a second one on top of it.
+  const onText = { handle: -1, hit: 2, hitSelected: false, hitType: "text" };
+  expect(pointerIntent(at("text"), down(), onText)).toEqual({ kind: "editText", index: 2 });
+  // A shape is not text, and empty canvas is not either.
+  const onRect = { handle: -1, hit: 2, hitSelected: false, hitType: "rectangle" };
+  expect(pointerIntent(at("text"), down(), onRect)).toEqual({ kind: "text" });
+  expect(pointerIntent(at("text"), down(), empty)).toEqual({ kind: "text" });
+});
+
+test("a point handle beats the box handle sitting on top of it", () => {
+  // On a diagonal arrow the two endpoints are exactly opposite corners of the
+  // bounding box, so this tie is every diagonal arrow rather than a rare case —
+  // and a resize handle winning it is how dragging an endpoint becomes a scale.
+  const onCorner = { point: 1, handle: HANDLE.SE, hit: 0, hitSelected: true };
+  expect(pointerIntent(at("select"), down(), onCorner)).toEqual({ kind: "point", index: 1 });
+  expect(cursorFor(at("select"), onCorner)).toBe("move");
+});
+
+test("a segment midpoint asks for a new point, and loses to a real one", () => {
+  expect(pointerIntent(at("select"), down(), { point: -1, midpoint: 0, handle: -1, hit: 0 }))
+    .toEqual({ kind: "addPoint", index: 0 });
+  // A point and a midpoint can only coincide on a zero-length segment, and
+  // moving the point that is there beats making another one.
+  expect(pointerIntent(at("select"), down(), { point: 2, midpoint: 0, handle: -1, hit: 0 }))
+    .toEqual({ kind: "point", index: 2 });
+});
+
+test("the image tool asks where before it asks what", () => {
+  expect(pointerIntent(at("image"), down(), empty)).toEqual({ kind: "image" });
+  expect(TOOLS.find((t) => t.id === "image").digit).toBe("9");
+  // No letter key: Excalidraw's image tool has none, and 9 is the whole of it.
+  expect(TOOLS.find((t) => t.id === "image").key).toBe("");
+  expect(toolForKey("9")).toBe("image");
+});
+
+test("the eraser sweeps rather than drawing", () => {
+  expect(pointerIntent(at("eraser"), down(), empty)).toEqual({ kind: "erase" });
+  // Over a shape too: the eraser has no interest in what is selected.
+  expect(pointerIntent(at("eraser"), down(), { handle: HANDLE.SE, hit: 1, hitSelected: true }))
+    .toEqual({ kind: "erase" });
 });
 
 test("space and the hand tool pan, whatever is underneath", () => {
@@ -236,6 +337,44 @@ test("zoom is on the keyboard as well as the wheel", () => {
   expect(keyIntent(key("=", { metaKey: true })).kind).toBe("zoom");
   expect(keyIntent(key("+", { metaKey: true })).factor).toBeGreaterThan(1);
   expect(keyIntent(key("-", { metaKey: true })).factor).toBeLessThan(1);
+});
+
+test("fit and zoom-to-selection are ⇧1 and ⇧2, matched on the physical key", () => {
+  // ⇧1 arrives as "!" and ⇧2 as "@", so `ev.key` cannot see them — Excalidraw
+  // tests `event.code` for exactly this and so does this.
+  expect(keyIntent(key("!", { shiftKey: true, code: "Digit1" }))).toEqual({ kind: "zoomFit" });
+  expect(keyIntent(key("@", { shiftKey: true, code: "Digit2" }))).toEqual({ kind: "zoomSelection" });
+  // Unshifted they are still the tool digits.
+  expect(keyIntent(key("1", { code: "Digit1" }))).toEqual({ kind: "tool", tool: "select" });
+});
+
+test("macOS z-order needs the physical bracket key", () => {
+  // Option is a compose modifier on a Mac, so ⌘⌥[ arrives with key "“" and
+  // never equals "[". These two never matched anything before.
+  expect(keyIntent(key("“", { metaKey: true, altKey: true, code: "BracketLeft" })))
+    .toEqual({ kind: "reorder", how: REORDER.BACK });
+  expect(keyIntent(key("‘", { metaKey: true, altKey: true, code: "BracketRight" })))
+    .toEqual({ kind: "reorder", how: REORDER.FRONT });
+  // And the plain forms still mean forward/backward, not front/back.
+  expect(keyIntent(key("]", { metaKey: true, code: "BracketRight" })))
+    .toEqual({ kind: "reorder", how: REORDER.FORWARD });
+});
+
+test("flip is shifted, and the grid is on the command key", () => {
+  expect(keyIntent(key("H", { shiftKey: true }))).toEqual({ kind: "flip", axis: "horizontal" });
+  expect(keyIntent(key("V", { shiftKey: true }))).toEqual({ kind: "flip", axis: "vertical" });
+  // Unshifted they are still the hand tool and nothing at all.
+  expect(keyIntent(key("h"))).toEqual({ kind: "tool", tool: "hand" });
+  expect(keyIntent(key("'", { metaKey: true }))).toEqual({ kind: "grid" });
+});
+
+test("the selection can be locked, and the sheet has a key", () => {
+  expect(keyIntent(key("l", { metaKey: true, shiftKey: true }))).toEqual({ kind: "toggleLock" });
+  // ⌘L on its own is not ours — it is the browser's address bar.
+  expect(keyIntent(key("l", { metaKey: true }))).toBe(null);
+  // `?` is a shifted key on every layout, so it has to be claimed ahead of the
+  // guard that throws shifted keys away.
+  expect(keyIntent(key("?", { shiftKey: true }))).toEqual({ kind: "help" });
 });
 
 test("tool keys, and the lock", () => {

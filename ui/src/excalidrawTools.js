@@ -33,6 +33,11 @@ import { HANDLE, HANDLE_CURSOR, REORDER } from "./xdWasm.js";
 /// a tool that draws nothing. `label` is what the pane header says is active —
 /// with no toolbar of its own, that readout is the only thing telling the user
 /// which tool a keystroke just selected.
+///
+/// `alias` is a second letter for the same tool. Excalidraw's freedraw is
+/// `letterKey: [KEYS.P, KEYS.X]` and both spellings are in the wild — P for
+/// "pencil" and X for the position it holds on the toolbar — so a hand that
+/// learned either one has to find the same tool here.
 export const TOOLS = Object.freeze([
   { id: "select", key: "v", digit: "1", label: "Select", cursor: "default", shape: null },
   { id: "rectangle", key: "r", digit: "2", label: "Rectangle", cursor: "crosshair", shape: "rectangle" },
@@ -40,8 +45,17 @@ export const TOOLS = Object.freeze([
   { id: "ellipse", key: "o", digit: "4", label: "Ellipse", cursor: "crosshair", shape: "ellipse" },
   { id: "arrow", key: "a", digit: "5", label: "Arrow", cursor: "crosshair", shape: "arrow" },
   { id: "line", key: "l", digit: "6", label: "Line", cursor: "crosshair", shape: "line" },
-  { id: "freedraw", key: "p", digit: "7", label: "Draw", cursor: "crosshair", shape: "freedraw" },
+  { id: "freedraw", key: "p", alias: "x", digit: "7", label: "Draw", cursor: "crosshair", shape: "freedraw" },
   { id: "text", key: "t", digit: "8", label: "Text", cursor: "text", shape: "text" },
+  // No letter key, because Excalidraw's image tool has none — 9 is the whole of
+  // it. `shape: null` for the same reason the eraser has none: an image is not
+  // dragged out, it is placed, and the bytes arrive from a file picker rather
+  // than from the pointer.
+  { id: "image", key: "", digit: "9", label: "Image", cursor: "crosshair", shape: null },
+  // The eraser draws nothing and inserts nothing: it sweeps, and what it
+  // touches goes. `shape: null` is what says so, the same way the hand tool
+  // says it.
+  { id: "eraser", key: "e", digit: "0", label: "Eraser", cursor: "crosshair", shape: null },
   { id: "hand", key: "h", digit: "", label: "Hand", cursor: "grab", shape: null },
 ]);
 
@@ -74,6 +88,31 @@ export const NUDGE_FAST = 10;
 /// that still counts as touching it. The caller divides by the zoom.
 export const HIT_SLOP = 10;
 
+/// How many handle radii wide a selection has to be before its handles are
+/// treated as grabbable from *inside* it.
+///
+/// The handle ring is measured in screen pixels and the box is not, so zooming
+/// out shrinks the box while the ring stays put: at 50% zoom the grab radius is
+/// 16 scene units, and a 25-unit-tall text element sits entirely inside its own
+/// north and south handles. The second press of a double-click then reads as a
+/// resize, and one pixel of jitter rescales the font — see
+/// docs/audit/audit-text.md item 8. Three radii is the point at which the ring
+/// has a body left in the middle of it to click on.
+const HANDLE_COLLAPSE_RADII = 3;
+
+/// True when a selection is too small at this zoom for its own handles to be
+/// distinguishable from its body. `box` is a `{ minX, minY, maxX, maxY }` in
+/// scene units and `radius` is the grab radius in the same units.
+///
+/// Both arguments are optional, and absent means "no": a caller that has not
+/// measured anything gets the plain handle-beats-shape rule, which is the one
+/// every test written before this stated.
+export function handlesCollapsed(box, radius) {
+  if (!box || !(radius > 0)) return false;
+  const limit = radius * HANDLE_COLLAPSE_RADII;
+  return (box.maxX - box.minX) < limit || (box.maxY - box.minY) < limit;
+}
+
 /// A fresh tool state. Not a class: it is three fields and a couple of pure
 /// functions over them, and a class would be an object pretending it has
 /// invariants to defend.
@@ -90,7 +129,7 @@ export function newToolState() {
 export function toolForKey(key) {
   const k = String(key ?? "").toLowerCase();
   if (k.length !== 1) return null;
-  const hit = TOOLS.find((t) => t.key === k || t.digit === k);
+  const hit = TOOLS.find((t) => t.key === k || t.alias === k || t.digit === k);
   return hit ? hit.id : null;
 }
 
@@ -128,9 +167,17 @@ export const mod = (ev) => !!(ev?.metaKey || ev?.ctrlKey);
 /// `probe` is what the caller has *already* asked the document, so this
 /// function needs no document of its own:
 ///
+///   `point`        the linear point handle under the pointer, or -1
+///   `midpoint`     the segment midpoint handle under the pointer, or -1
 ///   `handle`       the resize/rotate handle under the pointer, or -1
 ///   `hit`          the topmost element index under the pointer, or -1
 ///   `hitSelected`  whether that element is already in the selection
+///   `hitType`      that element's `type`, or ""
+///   `box`          the selection's bounds, in scene units, or null
+///   `handleRadius` the handle grab radius, in scene units
+///
+/// The last three are only read by the collapsed-handle rule below; a caller
+/// that does not measure them gets the behaviour that predates it.
 ///
 /// Returns one of the intents below, or null for a press this editor has no
 /// opinion about (the right button, which belongs to the context menu).
@@ -139,16 +186,27 @@ export const mod = (ev) => !!(ev?.metaKey || ev?.ctrlKey);
 ///   { kind: "rotate" }                       drag the rotate handle
 ///   { kind: "resize", handle }               drag a resize handle
 ///   { kind: "move", index, extend }          select and drag elements
-///   { kind: "marquee", extend }              sweep a rubber band
+///   { kind: "marquee", extend, contain }     sweep a rubber band
 ///   { kind: "draw", shape }                  drag out a new shape
 ///   { kind: "freedraw" }                     start a pencil stroke
 ///   { kind: "text" }                         place a text element
+///   { kind: "editText", index }              type into the text that is there
+///   { kind: "erase" }                        sweep elements away
+///   { kind: "point", index }                 drag one point of a line or arrow
+///   { kind: "addPoint", index }              split a segment and drag the new point
+///   { kind: "image" }                        place an image here
 ///
 /// The ordering of the tests is the whole behaviour, and it is deliberate: a
 /// pan wins over everything (space and the middle button are how you get out
-/// of any state), then handles, then elements, then empty canvas. A handle
-/// beats the element it belongs to, or a small selected shape would be
-/// impossible to resize — every grab would land on the shape and move it.
+/// of any state), then *point* handles, then box handles, then elements, then
+/// empty canvas. A handle beats the element it belongs to, or a small selected
+/// shape would be impossible to resize — every grab would land on the shape and
+/// move it.
+///
+/// Point handles beating box handles is the load-bearing part of that order. On
+/// a diagonal arrow the two endpoints sit exactly on opposite corners of the
+/// bounding box, so the tie is not a rare case — it is every diagonal arrow, and
+/// a box handle winning it is how dragging an endpoint silently becomes a scale.
 export function pointerIntent(state, ev, probe = {}) {
   const button = ev?.button ?? 0;
   // The middle button pans in every canvas application there has ever been.
@@ -159,19 +217,51 @@ export function pointerIntent(state, ev, probe = {}) {
   const tool = BY_ID.get(state?.tool) ?? TOOLS[0];
 
   if (tool.id === "select") {
+    // A point of the selected line or arrow, before anything else looks. See the
+    // note above about the diagonal-arrow tie.
+    const point = probe.point ?? -1;
+    if (point >= 0) return { kind: "point", index: point };
+    const midpoint = probe.midpoint ?? -1;
+    if (midpoint >= 0) return { kind: "addPoint", index: midpoint };
+
     const handle = probe.handle ?? -1;
-    if (handle >= 0) {
+    const hit = probe.hit ?? -1;
+    // The one exception to handle-beats-shape: when the ring has closed over
+    // the body (see HANDLE_COLLAPSE_RADII) a press *on the body* moves, so
+    // that double-clicking a small element while zoomed out reaches its text
+    // instead of rescaling it. A handle grabbed outside the body still
+    // resizes, which is what keeps a small shape resizable at all.
+    if (handle >= 0
+      && !(hit >= 0 && probe.hitSelected && handlesCollapsed(probe.box, probe.handleRadius))) {
       return handle === HANDLE.ROTATE ? { kind: "rotate" } : { kind: "resize", handle };
     }
-    const hit = probe.hit ?? -1;
     if (hit >= 0) return { kind: "move", index: hit, extend: !!ev?.shiftKey, selected: !!probe.hitSelected };
     // Shift on empty canvas adds to the selection rather than replacing it —
     // the same meaning shift has on a shape, which is the only way the
-    // modifier stays learnable.
-    return { kind: "marquee", extend: !!ev?.shiftKey };
+    // modifier stays learnable. Alt narrows the band to what it *encloses*
+    // rather than what it crosses, which is the mode xd-core has always
+    // supported and nothing ever asked for.
+    return { kind: "marquee", extend: !!ev?.shiftKey, contain: !!ev?.altKey };
   }
 
-  if (tool.id === "text") return { kind: "text" };
+  if (tool.id === "text") {
+    // Clicking text that is already there types into it. Without this the text
+    // tool stacks a second element on top of the first, which reads as "my
+    // text got duplicated and now I cannot edit either copy".
+    //
+    // TODO(labels): a *shape* under the pointer should bind a label to it
+    // rather than drop a free text element over it, the way double-clicking
+    // one already does — `editLabel` in excalidrawEdit.js is the whole of it,
+    // and this is the one route that does not reach it.
+    const hit = probe.hit ?? -1;
+    if (hit >= 0 && probe.hitType === "text") return { kind: "editText", index: hit };
+    return { kind: "text" };
+  }
+  if (tool.id === "eraser") return { kind: "erase" };
+  // The click says *where*; the file picker it opens says *what*. Excalidraw
+  // asks in the other order — picker first, then a click to place — and this way
+  // round is one less state to be in for the same two decisions.
+  if (tool.id === "image") return { kind: "image" };
   if (tool.id === "freedraw") return { kind: "freedraw" };
   if (tool.shape) return { kind: "draw", shape: tool.shape };
   return null;
@@ -187,9 +277,18 @@ export function cursorFor(state, probe = {}, dragging = false) {
   if (state?.space || state?.tool === "hand") return dragging ? "grabbing" : "grab";
   const tool = BY_ID.get(state?.tool) ?? TOOLS[0];
   if (tool.id !== "select") return tool.cursor;
+  // Same order as `pointerIntent`, or the cursor describes a gesture the press
+  // will not make.
+  if ((probe.point ?? -1) >= 0 || (probe.midpoint ?? -1) >= 0) return "move";
   const handle = probe.handle ?? -1;
-  if (handle >= 0) return HANDLE_CURSOR[handle] ?? "default";
-  return (probe.hit ?? -1) >= 0 ? "move" : "default";
+  const hit = probe.hit ?? -1;
+  // The same exception `pointerIntent` makes, or the cursor promises a resize
+  // and the click moves — which is worse than either behaviour on its own.
+  if (handle >= 0
+    && !(hit >= 0 && probe.hitSelected && handlesCollapsed(probe.box, probe.handleRadius))) {
+    return HANDLE_CURSOR[handle] ?? "default";
+  }
+  return hit >= 0 ? "move" : "default";
 }
 
 /// The pressure to record for a pointer sample.
@@ -230,6 +329,11 @@ export const isPressureDevice = (ev) => ev?.pointerType === "pen";
 ///   { kind: "reorder", how }
 ///   { kind: "group" } { kind: "ungroup" }
 ///   { kind: "zoom", factor } { kind: "zoomReset" }
+///   { kind: "zoomFit" } { kind: "zoomSelection" }
+///   { kind: "toggleLock" }                  ⌘⇧L — lock or unlock the selection
+///   { kind: "flip", axis }                  ⇧H / ⇧V
+///   { kind: "grid" }                        ⌘' — the grid, on or off
+///   { kind: "help" }                        ? — the shortcut sheet
 ///   { kind: "save" }
 ///   { kind: "edit" }                        Enter — type into what is selected
 ///
@@ -253,8 +357,16 @@ export function keyIntent(ev, state) {
     if (lower === "y") return { kind: "redo" };
     if (lower === "s") return { kind: "save" };
     if (lower === "g") return shift ? { kind: "ungroup" } : { kind: "group" };
+    if (lower === "l" && shift) return { kind: "toggleLock" };
     if (key === "]") return { kind: "reorder", how: shift ? REORDER.FRONT : REORDER.FORWARD };
     if (key === "[") return { kind: "reorder", how: shift ? REORDER.BACK : REORDER.BACKWARD };
+    // ⌘⌥[ and ⌘⌥] are macOS's own send-to-back / bring-to-front, and they
+    // cannot be matched on `key`: Option is a compose modifier there, so
+    // ⌘⌥[ arrives as "“" and never equals "[". The physical key is what the
+    // shortcut is about, so the physical key is what is tested.
+    if (ev?.altKey && ev?.code === "BracketRight") return { kind: "reorder", how: REORDER.FRONT };
+    if (ev?.altKey && ev?.code === "BracketLeft") return { kind: "reorder", how: REORDER.BACK };
+    if (key === "'") return { kind: "grid" };
     if (key === "0") return { kind: "zoomReset" };
     if (key === "=" || key === "+") return { kind: "zoom", factor: 1.2 };
     if (key === "-" || key === "_") return { kind: "zoom", factor: 1 / 1.2 };
@@ -269,6 +381,25 @@ export function keyIntent(ev, state) {
   if (key === "ArrowRight") return { kind: "nudge", dx: step, dy: 0 };
   if (key === "ArrowUp") return { kind: "nudge", dx: 0, dy: -step };
   if (key === "ArrowDown") return { kind: "nudge", dx: 0, dy: step };
+
+  // The shortcut sheet. `?` is a shifted key on every layout, so it has to be
+  // claimed before the shift guard below throws shifted keys away.
+  if (key === "?") return { kind: "help" };
+
+  // ⇧1 fits and ⇧2 zooms to the selection, which is where Excalidraw puts them
+  // — and it tests `event.code`, because ⇧1 arrives as "!" and not as "1".
+  // ⌘0, above, is *reset to 100%*: the three were one key here, which is the
+  // silent-mistake failure this module's header is about.
+  if (shift && !ev?.altKey) {
+    if (ev?.code === "Digit1") return { kind: "zoomFit" };
+    if (ev?.code === "Digit2") return { kind: "zoomSelection" };
+    // ⇧H and ⇧V flip, which is Excalidraw's pair. Unshifted, H is the hand tool;
+    // shift is what tells the two apart, so these have to be claimed here rather
+    // than left to the guard below.
+    const lower = key.toLowerCase();
+    if (lower === "h") return { kind: "flip", axis: "horizontal" };
+    if (lower === "v") return { kind: "flip", axis: "vertical" };
+  }
 
   // Shift is the extend-selection modifier everywhere else in this editor, so
   // a shifted letter is not a tool pick — it is someone holding shift from the

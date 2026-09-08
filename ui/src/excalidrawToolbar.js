@@ -33,9 +33,15 @@ import { TOOLS } from "./excalidrawTools.js";
 /// draw anything, then the shapes roughly in order of how often they are used.
 /// Matching it matters for the same reason matching the shortcuts does: a hand
 /// that has used Excalidraw reaches for the third button without looking.
+/// The eraser sits last among the drawing tools, where Excalidraw puts it —
+/// after text, past everything that makes a mark. It is the one entry here that
+/// is not a shape, and it belongs on this side of the divider rather than beside
+/// select and hand: it changes the document, which is what the tools below the
+/// divider have in common and what select and hand do not.
 const ORDER = [
   "select", "hand",
   "rectangle", "diamond", "ellipse", "arrow", "line", "freedraw", "text",
+  "image", "eraser",
 ];
 
 /// Where the divider goes — after the two tools that do not draw.
@@ -74,6 +80,15 @@ const ICONS = {
     + '<path d="M13.5 6.5l4 4" />',
   text:
     '<path d="M4 6v-1h16v1" /><path d="M12 5v14" /><path d="M9 19h6" />',
+  image:
+    '<path d="M15 8h.01" />'
+    + '<path d="M3 6a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12z" />'
+    + '<path d="M3 16l5 -5c.928 -.893 2.072 -.893 3 0l5 5" />'
+    + '<path d="M14 14l1 -1c.928 -.893 2.072 -.893 3 0l3 3" />',
+  eraser:
+    '<path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 '
+    + '0 1.41l-9.2 9.3" />'
+    + '<path d="M18 13.3l-6.3 -6.3" />',
   lock:
     '<path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z" />'
     + '<path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0" />'
@@ -86,10 +101,24 @@ const svg = (body) =>
   + 'stroke-linejoin="round" aria-hidden="true" focusable="false">'
   + '<path stroke="none" d="M0 0h24v24H0z" fill="none" />' + body + "</svg>";
 
-/// A tool's shortcuts as a sentence: "R or 2", or just "H" for the one tool
-/// without a digit. The title is where a shortcut is actually learned — the
-/// little numeral on the button is a reminder for someone who already knows.
-const shortcutOf = (tool) => (tool.digit ? `${tool.key.toUpperCase()} or ${tool.digit}` : tool.key.toUpperCase());
+/// A tool's shortcuts as a sentence: "R or 2", "H" for the one tool without a
+/// digit, "9" for the one without a letter. The title is where a shortcut is
+/// actually learned — the little numeral on the button is a reminder for someone
+/// who already knows.
+///
+/// `alias` is listed too ("P, X or 7"). Draw is the only tool with one, and both
+/// spellings are in the wild upstream, so a hand that learned X finds nothing
+/// telling it X works unless this says so.
+///
+/// Built from whatever the tool has rather than from a fixed shape, because the
+/// table has grown a tool with no letter (image, digit only) and would otherwise
+/// have got a title reading "Image — ".
+const shortcutOf = (tool) => {
+  const keys = [tool.key, tool.alias].filter(Boolean).map((k) => k.toUpperCase());
+  if (tool.digit) keys.push(tool.digit);
+  if (keys.length === 1) return keys[0];
+  return `${keys.slice(0, -1).join(", ")} or ${keys[keys.length - 1]}`;
+};
 
 /// The stylesheet lives beside this module rather than in the app's own, so
 /// the port is a copy of two files instead of a copy of one plus a diff
