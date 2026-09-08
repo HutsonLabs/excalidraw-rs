@@ -107,7 +107,7 @@ export async function exportPng({ getView, docPath, report }) {
   report?.("PNG export needs a bytes-capable write command (xd_write_bytes).");
 }
 
-/// The export entries for the app's header, in `viewActions.js`'s descriptor
+/// The export entries for the app's menu, in `viewActions.js`'s descriptor
 /// shape. Contributed by the shell alongside the view's own actions rather
 /// than by the view, because these two are the dialog half — the view will
 /// contribute its own Export entries when it grows the capability, and the two
@@ -117,12 +117,16 @@ export function exportActions({ getView, docPath, report }) {
     {
       id: "app-export-png",
       label: "PNG",
+      name: "PNG…",
+      group: "export",
       title: "Export this drawing as a PNG",
       run: () => exportPng({ getView, docPath: docPath(), report }),
     },
     {
       id: "app-export-svg",
       label: "SVG",
+      name: "SVG…",
+      group: "export",
       title: "Export this drawing as an SVG",
       run: () => exportSvg({ getView, docPath: docPath(), report }),
     },

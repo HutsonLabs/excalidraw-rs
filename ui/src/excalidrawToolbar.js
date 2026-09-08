@@ -116,8 +116,16 @@ function ensureStylesheet() {
 
 /// Mount the tool island into `host`.
 ///
-///   renderToolbar(host, { getTool, setTool, getLocked, setLocked })
+///   renderToolbar(host, { getTool, setTool, getLocked, setLocked, inline })
 ///     -> { refresh(), dispose() }
+///
+/// `inline` says the host is putting the tools in a bar of its own — the app's
+/// titlebar, a pane header — rather than letting them float over the canvas.
+/// It changes nothing about what the island *is*; it drops the card (the
+/// absolute placement, the panel fill, the border and the shadow) so the
+/// buttons sit in the host's row as if they had always been there. A card
+/// nested inside a bar is the second piece of chrome saying what the first one
+/// already said, which is the thing this file's header swears off.
 ///
 /// `getTool()` and `getLocked()` read the editor's tool state; `setTool(id)`
 /// and `setLocked(on)` write it. The island holds none of it — the state
@@ -129,7 +137,7 @@ function ensureStylesheet() {
 /// The same shape as `renderProps`, and the same reasons: the DOM is built
 /// once and then synced, never rebuilt, because `refresh()` may be called
 /// while the keyboard is on one of these buttons.
-export function renderToolbar(host, { getTool, setTool, getLocked, setLocked } = {}) {
+export function renderToolbar(host, { getTool, setTool, getLocked, setLocked, inline } = {}) {
   if (!host) return { refresh() {}, dispose() {} };
   ensureStylesheet();
 
@@ -139,7 +147,7 @@ export function renderToolbar(host, { getTool, setTool, getLocked, setLocked } =
     offs.push(() => node.removeEventListener(type, fn));
   };
 
-  const root = div("xdt-island");
+  const root = div(inline ? "xdt-island xdt-inline" : "xdt-island");
   root.setAttribute("role", "toolbar");
   root.setAttribute("aria-label", "Drawing tools");
   // Not in the tab order as nine separate stops: a toolbar is one stop, and

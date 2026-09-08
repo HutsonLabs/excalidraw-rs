@@ -275,7 +275,19 @@ function ensureStylesheet() {
 ///
 /// `activeTool` is optional and may be a string or a function returning one;
 /// see `panelShown` for what it decides.
-export function renderProps(host, { getStyle, setStyle, hasSelection, activeTool } = {}) {
+///
+/// `shown` is optional and, when it has an answer, *replaces* that rule: it is
+/// a function returning whether the panel should be on screen at all. It
+/// exists because a host may put the panel behind a sidebar toggle, and a
+/// toggle the user just pressed that leaves the panel hidden — because the
+/// select tool happens to be active with nothing selected — is a broken
+/// button, not a tidy one.
+///
+/// Returning null or undefined means "no opinion", and the rule above applies.
+/// That is what a host gets before it has expressed one, so a view mounted in
+/// a pane that never drew a toggle behaves exactly as it did before there was
+/// one to draw.
+export function renderProps(host, { getStyle, setStyle, hasSelection, activeTool, shown } = {}) {
   if (!host) return { refresh() {}, dispose() {} };
   ensureStylesheet();
 
@@ -522,7 +534,9 @@ export function renderProps(host, { getStyle, setStyle, hasSelection, activeTool
     if (disposed) return;
     const tool = typeof activeTool === "function" ? activeTool() : activeTool;
     const selected = !!hasSelection?.();
-    if (!panelShown({ hasSelection: selected, tool })) {
+    const say = shown?.();
+    const want = say == null ? panelShown({ hasSelection: selected, tool }) : !!say;
+    if (!want) {
       setAttached(false);
       return;
     }

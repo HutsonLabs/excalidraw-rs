@@ -17,6 +17,22 @@
 // `id` is what the row diffs against, so a view may republish on every frame
 // — the canvas does, for its zoom readout — without churning the DOM or
 // dropping the button the pointer is over.
+//
+// Three optional fields carry nothing this renderer uses and are ignored here:
+//
+//   name       a short human label — "Undo", "Fit to view"
+//   shortcut   how to reach it from the keyboard, as it should be printed
+//   group      "file" | "edit" | "view" | "export", for sorting into sections
+//
+// They are for a host that renders these descriptors as a *menu* rather than
+// as a row: the standalone app does (ui/standalone/menu.js), because a Mac
+// window puts its verbs behind one button instead of spreading eleven icons
+// across the titlebar. term.hut has the room and keeps the row.
+//
+// A descriptor without a `name` is not a menu entry. That is the opt-in, and
+// it is deliberate: the view offers `Save now` because a pane header should
+// show it, and the app leaves it out because the app has a File section with a
+// Save of its own that also knows what to do when there is no path yet.
 import { el } from "./dom.js";
 import { setPressed } from "./a11y.js";
 

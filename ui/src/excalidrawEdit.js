@@ -101,9 +101,26 @@ const PASTE_OFFSET = 10;
 /// module mock, which in a shared test process leaks into everyone else's
 /// files. No caller in the app passes it.
 ///
+/// `toolbarSlot` is an element the host would rather the tool island lived in
+/// — its titlebar, its pane header — instead of the island floating over the
+/// top of the canvas. It is optional and the view does not care which it gets:
+/// a host that offers nothing keeps the floating island, which is what a
+/// browser opening ui/ off disk and a term.hut pane both get. Nothing else
+/// changes; the island is the same module either way and is torn down by the
+/// same dispose.
+///
+/// `sidebar` is whether the properties panel starts on screen, and the handle
+/// this returns carries `setSidebar(on)` / `sidebarOpen()` so a host that has
+/// drawn a toggle for it can drive it afterwards. Passing nothing leaves the
+/// panel deciding for itself — it shows when there is a selection to edit or a
+/// drawing tool whose defaults are worth setting — which is what a host with
+/// no toggle wants and what every host got before there was one.
+///
 /// Returns a dispose function. Call it twice if it is convenient; the second
 /// call does nothing.
-export function renderExcalidraw(host, text, { onSave, onActions, openDocument = openDoc } = {}) {
+export function renderExcalidraw(host, text, {
+  onSave, onActions, toolbarSlot = null, sidebar = null, openDocument = openDoc,
+} = {}) {
   // --- the surface ---------------------------------------------------------
   //
   // Three elements and no stylesheet. The class names match term.hut's so the
@@ -129,13 +146,21 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   // and the island measures against `wrap`, which is what it wants.
   wrap.appendChild(canvas);
   wrap.appendChild(panelHost);
-  wrap.appendChild(toolbarHost);
+  // Only when the island is ours to place. With a host slot this div would be
+  // an empty element inside the pointer target for no reason.
+  if (!toolbarSlot) wrap.appendChild(toolbarHost);
   // Focusable, or the keyboard — which is how tools are chosen — never
   // reaches us.
   wrap.tabIndex = 0;
   host.appendChild(wrap);
 
-  const colors = chromeTheme(wrap);
+  /// Chrome colours, read from the host's CSS custom properties. `let`, not
+  /// `const`: the app can switch between its light and dark palettes while the
+  /// view is mounted, and --bg (which is what a resize handle is filled with)
+  /// is one of the tokens that changes. Read once per switch rather than per
+  /// frame — getComputedStyle forces style resolution and this would otherwise
+  /// run inside the paint loop of a drag.
+  let colors = chromeTheme(wrap);
 
   // --- state ---------------------------------------------------------------
 
@@ -366,13 +391,19 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   const publish = () => {
     if (detached) return;
     onActions?.([
-      { id: "xd-fit", icon: "fit", title: "Fit the drawing to the pane (⌘0)", run: act(fit) },
-      { id: "xd-out", icon: "zoomOut", title: "Zoom out (⌘−)", run: act(() => zoomAt(1 / 1.2, ...centre())) },
+      { id: "xd-fit", icon: "fit", title: "Fit the drawing to the pane (⌘0)", run: act(fit),
+        name: "Fit to view", shortcut: "⌘0", group: "view" },
+      { id: "xd-out", icon: "zoomOut", title: "Zoom out (⌘−)", run: act(() => zoomAt(1 / 1.2, ...centre())),
+        name: "Zoom out", shortcut: "⌘−", group: "view" },
       { id: "xd-zoom", kind: "status", text: zoomText },
-      { id: "xd-in", icon: "zoomIn", title: "Zoom in (⌘+)", run: act(() => zoomAt(1.2, ...centre())) },
-      { id: "xd-one", label: "1:1", title: "Actual size", run: act(() => zoomAt(1 / camera.scale, ...centre())) },
-      { id: "xd-undo", label: "↶", title: "Undo (⌘Z)", run: act(() => history("undo")), disabled: !doc?.canUndo() },
-      { id: "xd-redo", label: "↷", title: "Redo (⌘⇧Z)", run: act(() => history("redo")), disabled: !doc?.canRedo() },
+      { id: "xd-in", icon: "zoomIn", title: "Zoom in (⌘+)", run: act(() => zoomAt(1.2, ...centre())),
+        name: "Zoom in", shortcut: "⌘+", group: "view" },
+      { id: "xd-one", label: "1:1", title: "Actual size", run: act(() => zoomAt(1 / camera.scale, ...centre())),
+        name: "Actual size", group: "view" },
+      { id: "xd-undo", label: "↶", title: "Undo (⌘Z)", run: act(() => history("undo")), disabled: !doc?.canUndo(),
+        name: "Undo", shortcut: "⌘Z", group: "edit" },
+      { id: "xd-redo", label: "↷", title: "Redo (⌘⇧Z)", run: act(() => history("redo")), disabled: !doc?.canRedo(),
+        name: "Redo", shortcut: "⇧⌘Z", group: "edit" },
       // Which tool is live. With no toolbar of its own this readout is the
       // only thing that says a keystroke changed the tool, and a drawing app
       // whose next click does something unexpected is an infuriating one.
@@ -1215,6 +1246,15 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   // against a contract; this view has to work while it does not exist yet, and
   // has to keep working if it ever fails to load.
 
+  /// Whether the properties sidebar is on screen. The view owns the state and
+  /// the host owns the button, which is the same division as the tool island:
+  /// the host decides where a control lives, the view decides what it means.
+  ///
+  /// Null until a host says otherwise, and null is not "closed" — it is "no
+  /// opinion", which hands the decision back to the panel's own rule. A host
+  /// that never drew a toggle must not be silently made to hold one.
+  let sidebarOpen = sidebar == null ? null : !!sidebar;
+
   const applyStyle = (patch) => {
     style = mergeStyle(style, patch);
     // With a selection, the patch is an edit; without one it is a preference
@@ -1236,7 +1276,12 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
         // screen over an empty canvas with the select tool active, and the
         // tool changes on a keystroke it never sees.
         activeTool: () => tools.tool,
+        // With a toggle in the host's chrome, "is it open" is the user's
+        // answer and not a guess from the tool and the selection. The panel's
+        // own rule stays the default for hosts that never call setSidebar.
+        shown: () => sidebarOpen,
       });
+      panel.refresh?.();
     })
     .catch(() => {
       // The editor is fully usable from the keyboard without it; a missing
@@ -1270,7 +1315,26 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
   });
   ro?.observe(wrap);
 
-  toolbar = renderToolbar(toolbarHost, {
+  /// The host repainting itself in a different palette. Watched rather than
+  /// pushed: a host that switches themes does so by changing an attribute on
+  /// <html> — the app writes `data-theme` there, and term.hut's own theming
+  /// works the same way — so the view can notice on its own and needs no
+  /// second entry in the mount contract for it. A host that never changes
+  /// anything up there never fires this.
+  const themeWatch = typeof MutationObserver === "undefined" || !wrap.ownerDocument
+    ? null
+    : new MutationObserver(() => {
+      if (detached) return;
+      colors = chromeTheme(wrap);
+      schedule();
+    });
+  themeWatch?.observe(wrap.ownerDocument.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme", "class"],
+  });
+
+  toolbar = renderToolbar(toolbarSlot ?? toolbarHost, {
+    inline: !!toolbarSlot,
     getTool: () => tools.tool,
     setTool: (id) => {
       tools.tool = id;
@@ -1334,7 +1398,20 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
 
   // --- teardown ------------------------------------------------------------
 
-  return function dispose() {
+  /// The handle. A function, because the contract is "returns dispose" and
+  /// term.hut's preview.js stores exactly that — with the view's capabilities
+  /// hung off it, which is the shape export.js already reaches for
+  /// (`view.exportPNG`). A host that only ever calls it as a function never
+  /// notices the rest.
+  dispose.setSidebar = (on) => {
+    if (detached) return;
+    sidebarOpen = !!on;
+    panel?.refresh?.();
+  };
+  dispose.sidebarOpen = () => sidebarOpen;
+  return dispose;
+
+  function dispose() {
     if (detached) return;
     detached = true;
 
@@ -1344,6 +1421,7 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
     // during the flush would edit a document nobody is watching.
     for (const [target, type, fn, opts] of listeners) target?.removeEventListener(type, fn, opts);
     ro?.disconnect();
+    themeWatch?.disconnect();
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
     editing = null;
@@ -1373,5 +1451,5 @@ export function renderExcalidraw(host, text, { onSave, onActions, openDocument =
     };
     if (pending) save().then(finish, finish);
     else finish();
-  };
+  }
 }

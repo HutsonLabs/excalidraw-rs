@@ -135,6 +135,17 @@ export class FakeNode {
     this.parentNode?.removeChild(this);
   }
 
+  /// Empty this node and put `nodes` in it. A real method, and the one the
+  /// menu uses to rebuild itself, so the fake owes it rather than forcing the
+  /// code under test into a loop it would not otherwise write.
+  replaceChildren(...nodes) {
+    for (const c of this.children) {
+      if (c.parentNode === this) c.parentNode = null;
+    }
+    this.children = [];
+    for (const n of nodes) this.appendChild(n);
+  }
+
   /// Deliver an event to whatever is listening, with the two methods every
   /// handler calls on it. Does not bubble: nothing under test relies on it,
   /// and a fake that bubbled would have to model capture and stopPropagation
@@ -208,12 +219,20 @@ export function installDom({ width = 0, height = 0, context = () => null } = {})
   defaultHeight = height;
 
   const head = new FakeNode("head");
+  // The document listens too — a popover dismisses itself on a press anywhere
+  // else, and that listener is on `document`. Delegated to a node rather than
+  // stubbed with no-ops so it lands in the same ledger as every other
+  // listener: one that outlived its menu is exactly the leak this file counts.
+  const docNode = new FakeNode("document");
   globalThis.document = {
     createElement: (tag) => new FakeNode(tag),
     head,
     body: new FakeNode("body"),
     getElementById: () => null,
     querySelectorAll: () => [],
+    addEventListener: (type, fn, opts) => docNode.addEventListener(type, fn, opts),
+    removeEventListener: (type, fn, opts) => docNode.removeEventListener(type, fn, opts),
+    dispatch: (type, ev) => docNode.dispatch(type, ev),
   };
   const win = new FakeNode("window");
   win.devicePixelRatio = 1;

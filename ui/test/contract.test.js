@@ -280,6 +280,10 @@ const mount = async (opts = {}) => {
       return opts.onSave?.(text);
     },
     onActions: (list) => { actions = list; },
+    // Absent for every test but the two that are about it: the default is the
+    // floating island, because that is what a host which offers nothing gets.
+    toolbarSlot: opts.toolbarSlot,
+    sidebar: opts.sidebar,
     openDocument: openFake,
   });
   // The core and the properties panel are both loaded lazily, so the view is
@@ -692,6 +696,85 @@ test("the lock button keeps the tool after a draw", async () => {
   lift(wrap, 260, 240);
   expect(activeTool(actions)).toBe("Rectangle (locked)");
   dispose();
+});
+
+// --- the sidebar, when the host has drawn a toggle for it ---------------------
+//
+// The app puts a sidebar button in its titlebar and drives the panel through
+// the handle. What must not follow from that is every *other* host acquiring a
+// toggle it never asked for, so the default is pinned here alongside it.
+
+const propsOf = (wrap) => wrap.children.find((c) => c.className === "xd-props");
+
+test("without a sidebar option the panel still decides for itself", async () => {
+  const { wrap, dispose } = await mount();
+  // Select tool, nothing selected: the panel's own rule says stay off.
+  expect(propsOf(wrap).children).toHaveLength(0);
+  type(wrap, "a", { metaKey: true });
+  expect(propsOf(wrap).children).toHaveLength(1);
+  dispose();
+});
+
+test("a host that owns the sidebar gets the last word on it", async () => {
+  const { wrap, dispose } = await mount({ sidebar: true });
+  // Open even with the select tool and an empty selection, which is exactly
+  // the case the panel's own rule would hide — a toggle that leaves the
+  // sidebar shut is a broken button.
+  expect(propsOf(wrap).children).toHaveLength(1);
+  expect(dispose.sidebarOpen()).toBe(true);
+
+  dispose.setSidebar(false);
+  expect(propsOf(wrap).children).toHaveLength(0);
+  expect(dispose.sidebarOpen()).toBe(false);
+
+  // And shut stays shut through a selection, which is the other half of "the
+  // host has the last word".
+  type(wrap, "a", { metaKey: true });
+  expect(propsOf(wrap).children).toHaveLength(0);
+
+  dispose.setSidebar(true);
+  expect(propsOf(wrap).children).toHaveLength(1);
+  dispose();
+});
+
+// The app hosts the island in its titlebar (ui/standalone/shell.js), which is
+// where macOS puts a window's tools. These pin the two things that must stay
+// true of that: the host chooses, and the view still owns what it built.
+
+test("a toolbar slot takes the island out of the canvas", async () => {
+  const slot = new FakeNode("div");
+  const { wrap, dispose } = await mount({ toolbarSlot: slot });
+
+  // In the slot, and only there. The empty container the island used to live
+  // in is not left behind inside the pointer target.
+  const island = slot.children[0];
+  expect(island).toBeDefined();
+  expect(island.children.filter((c) => c.tagName === "BUTTON")).toHaveLength(TOOLS.length + 1);
+  expect(wrap.children.find((c) => c.className === "xd-toolbar")).toBeUndefined();
+
+  // Hosted in a bar, so it drops the card it wears over a canvas.
+  expect(island.className).toContain("xdt-inline");
+
+  // And it is still the same island: the buttons work from here.
+  const rect = island.children.find((c) => String(c.title ?? "").startsWith("Rectangle"));
+  rect.dispatch("click", {});
+  press(wrap, 200, 200);
+  move(wrap, 260, 240);
+  lift(wrap, 260, 240);
+  expect(live.element(live.length - 1).type).toBe("rectangle");
+
+  dispose();
+});
+
+test("dispose empties a host's toolbar slot", async () => {
+  // The slot outlives the view — shell.js remounts into the same titlebar on
+  // every file it opens — so a view that left its buttons there would stack a
+  // second set of tools on top of the first, wired to a document that is gone.
+  const slot = new FakeNode("div");
+  const { dispose } = await mount({ toolbarSlot: slot });
+  expect(slot.children).toHaveLength(1);
+  dispose();
+  expect(slot.children).toHaveLength(0);
 });
 
 test("a click on the chrome does not reach the canvas behind it", async () => {

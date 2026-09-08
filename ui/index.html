@@ -5,12 +5,15 @@
     <title>excalidraw-rs</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- Tints the browser chrome above the window to the titlebar's own color,
-         so there is no light seam over the app's. -->
-    <meta name="theme-color" content="#1e1e22" />
+         so there is no light seam over the app's. Dark --bg-alt, because dark
+         is what a window shows before the appearance is resolved; theme.js
+         rewrites it from the live token the moment it runs, and on every
+         switch after. -->
+    <meta name="theme-color" content="#17171a" />
     <script>
       // Decided before the stylesheet is applied, and deliberately inline: the
       // titlebar reserves a strip on the left for macOS' traffic lights
-      // (tauri.conf.json puts them at x:16, y:20 under titleBarStyle:
+      // (tauri.conf.json puts them at x:10, y:20 under titleBarStyle:
       // "Overlay", which means they float over our own chrome and we owe them
       // the room). Outside Tauri — a plain browser opening ui/ off disk, which
       // is how the painter gets exercised without building the app — there are
@@ -21,6 +24,29 @@
       // wrongly-padded chrome. Same trick, and the same class name, as
       // term.hut's index.html.
       if (!window.__TAURI__) document.documentElement.classList.add("web");
+
+      // The appearance, decided before the stylesheet is applied and for the
+      // same reason the strip above is: the alternative is a window that
+      // flashes dark and then repaints light on every launch. theme.js owns
+      // the setting; this is the twelve lines of it that have to run before
+      // first paint, so it deliberately duplicates the key name and the
+      // fallback rather than importing a module (a module is fetched, and a
+      // fetch is a frame).
+      //
+      // Only the *resolved* theme goes on the element. The stylesheet then has
+      // two cases instead of three and never asks what the system is doing.
+      try {
+        const stored = localStorage.getItem("xd-appearance");
+        const pref = stored === "light" || stored === "dark" ? stored : "system";
+        const root = document.documentElement;
+        root.dataset.themePref = pref;
+        root.dataset.theme = pref === "system"
+          ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+          : pref;
+      } catch {
+        // Storage refused, or there is no matchMedia. Dark is the documented
+        // default and the stylesheet already assumes it.
+      }
 
       // The last resort. shell.js reports the failures it can see, but a
       // module that fails to parse or to resolve never runs, so its own
@@ -65,17 +91,37 @@
          term.hut's pane header, and the reason the port is a copy rather than
          an unpicking (see viewActions.js). -->
     <header id="titlebar">
-      <div id="doc">
-        <!-- Both filled by textContent from shell.js; never innerHTML. -->
-        <span id="doc-name">Untitled</span>
-        <!-- The dirty marker. A dot rather than a word, because it changes on
-             every keystroke and a word that flickers is noise. -->
-        <span id="doc-dirty" hidden aria-hidden="true">●</span>
+      <div id="titlebar-left">
+        <!-- The sidebar toggle, built by shell.js. First thing after the
+             traffic lights, which is where macOS puts one. -->
+        <div id="sidebar-slot"></div>
+        <div id="doc">
+          <!-- Both filled by textContent from shell.js; never innerHTML. -->
+          <span id="doc-name">Untitled</span>
+          <!-- The dirty marker. A dot rather than a word, because it changes on
+               every keystroke and a word that flickers is noise. -->
+          <span id="doc-dirty" hidden aria-hidden="true">●</span>
+        </div>
       </div>
-      <!-- viewActions.js paints into this and diffs by id, so the view may
-           republish on every frame (it does, for the zoom readout) without
-           churning the DOM or dropping the button the pointer is over. -->
-      <div id="view-actions" hidden></div>
+      <!-- The mounted view's tool island, hosted by the app rather than
+           floating over the canvas. macOS puts a window's tools in its
+           titlebar (a unified toolbar), not in a card laid on top of the
+           document, and a drawing app has less to lay a card on than most.
+           shell.js hands this element to the view as its toolbar slot; a view
+           mounted anywhere without one — a browser opening ui/ off disk,
+           term.hut's pane — keeps the floating island it has always had. -->
+      <div id="tool-slot"></div>
+
+      <div id="titlebar-right">
+        <!-- One line of trouble, and only trouble: a failed save, a file that
+             would not open, "no app host". Everything that is merely *true* —
+             the zoom, the live tool, whether the last autosave landed — went
+             into the menu or onto the canvas, but a failure the user has not
+             seen yet may not be behind a click. -->
+        <span id="app-status" hidden></span>
+        <!-- menu.js: every verb the app has, behind one button. -->
+        <div id="menu-slot"></div>
+      </div>
     </header>
 
     <!-- One full-bleed host, and the view owns everything inside it. The

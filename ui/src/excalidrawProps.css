@@ -15,33 +15,56 @@
  * of the transparency checkerboard, which are a *pattern* and not a theme.
  */
 
-/* Positioned against the nearest positioned ancestor, which is the view's own
- * .xd-wrap. Absolute rather than fixed: the island belongs to the canvas, and
- * in term.hut the canvas is a pane inside a window, not the window. */
+/* A sidebar, not a card.
+ *
+ * It was a floating rounded panel inset from the top-left corner — which is
+ * what Excalidraw does on the web, where the page is a document and a panel
+ * laid on top of it reads as a palette. In a Mac window it reads as something
+ * left lying there: macOS puts a window's inspector against the edge, running
+ * the full height of the content, translucent, with a hairline between it and
+ * what it is inspecting. A rounded card floating 12px off two edges is the one
+ * shape the platform doesn't use.
+ *
+ * So: flush to the leading edge, top to bottom, no radius, no shadow, one
+ * border. The gap it used to sit in is gone, which is also 24px of drawing
+ * back.
+ *
+ * Still absolutely positioned against the view's own .xd-wrap, and still
+ * *over* the canvas rather than beside it. That is deliberate and not laziness
+ * about flex: the canvas is sized from `wrap.clientWidth` and every pointer
+ * event is resolved against `wrap.getBoundingClientRect()`, so a sidebar that
+ * took width out of the flow would put the drawing's coordinate origin and the
+ * mouse's in two different places. Over the canvas, with the vibrancy that
+ * makes a macOS sidebar legible against whatever is behind it, is both the
+ * platform's own answer and the one that leaves those two agreeing. */
 .xdp-island {
   position: absolute;
   z-index: 4;
-  top: 0.75rem;
-  left: 0.75rem;
-  /* Tall enough to hold ten rows, and scrolls rather than growing past the
-     canvas on a short window — a panel taller than the viewport hides its own
-     bottom controls with no way to reach them. */
-  max-height: calc(100% - 1.5rem);
+  top: 0;
+  left: 0;
+  bottom: 0;
+  /* Scrolls rather than growing past the canvas on a short window — a panel
+     taller than the viewport hides its own bottom controls with no way to
+     reach them. */
   overflow-y: auto;
   overscroll-behavior: contain;
 
   display: flex;
   flex-direction: column;
-  gap: 0.625rem;
-  padding: 0.75rem;
-  width: 12.5rem;
+  gap: 0.75rem;
+  padding: 0.875rem 0.75rem;
+  width: 13rem;
   box-sizing: border-box;
 
-  background: var(--panel, var(--surface));
+  /* --vibrancy is the app's; --panel is the token term.hut already defines.
+     The chain means a host that has never heard of vibrancy gets a perfectly
+     good opaque sidebar rather than a transparent one, which is the failure
+     mode worth designing for. */
+  background: var(--vibrancy, var(--panel, var(--surface)));
   color: var(--fg, var(--text));
-  border: 1px solid var(--border);
-  border-radius: 0.625rem;
-  box-shadow: 0 0.25rem 1rem hsla(0, 0%, 0%, 0.28);
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
   font-family: var(--font-ui);
   font-size: 0.75rem;
 
@@ -50,7 +73,38 @@
   transition: opacity 120ms ease, transform 120ms ease;
 }
 
+/* The blur is what makes a translucent sidebar readable — without it a
+ * 72%-alpha panel over a drawing is a panel with a drawing showing through it.
+ * WebKit is the engine this app actually ships on and it wants the prefix; the
+ * unprefixed property is there for everywhere else. */
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .xdp-island {
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+}
+
+/* No blur available: fall back to something opaque. A host with neither token
+ * lands on --panel, which is opaque by construction. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .xdp-island {
+    background: var(--vibrancy-fallback, var(--panel, var(--surface)));
+  }
+}
+
+/* The sidebar's own heading — "Selected" or "New shape". Ruled off from the
+   groups below it, the way a macOS sidebar's header is, so it reads as the
+   sidebar's title rather than as the first of eleven group labels.
+
+   Not sticky, though a panel that scrolls is exactly where sticky belongs: the
+   sidebar is translucent, and a sticky header can only be translucent too
+   (anything opaque would be a bright bar across a vibrant panel), which means
+   the rows would slide visibly through it. */
 .xdp-title {
+  flex: none;
+  margin: 0 -0.75rem;
+  padding: 0 0.75rem 0.625rem;
+  border-bottom: 1px solid var(--border);
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -80,7 +134,7 @@
 /* --- Buttons ---------------------------------------------------------------
  *
  * One skin for the icon buttons and one for the swatches. Both are 1.75rem
- * squares: a row of eight of them has to fit a 12.5rem panel, and a target
+ * squares: a row of eight of them has to fit a 13rem sidebar, and a target
  * smaller than about 28px is one people miss.
  */
 

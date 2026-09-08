@@ -17,13 +17,14 @@
 // scripts/check-imports.mjs enforces that; see its header for why the rule
 // needed mechanising rather than remembering.
 
-import { renderActions } from "../src/viewActions.js";
+import { el } from "../src/dom.js";
 import { renderExcalidraw } from "../src/excalidrawEdit.js";
 import {
   basename, chooseOpenPath, chooseSavePath, emptyScene, installShortcuts,
   isApp, readFile, startupPath, writeFile,
 } from "./files.js";
 import { exportActions } from "./export.js";
+import { installMenu } from "./menu.js";
 
 // --- the mount ---------------------------------------------------------------
 //
@@ -43,9 +44,55 @@ const mountView = renderExcalidraw;
 // --- the document ------------------------------------------------------------
 
 const host = document.getElementById("host");
-const actionsHost = document.getElementById("view-actions");
+const toolSlot = document.getElementById("tool-slot");
+const statusEl = document.getElementById("app-status");
 const nameEl = document.getElementById("doc-name");
 const dirtyEl = document.getElementById("doc-dirty");
+
+// --- the sidebar toggle ------------------------------------------------------
+//
+// The button is the app's and the panel is the view's, which is the same split
+// as the tool island: the host decides where a control lives, the view decides
+// what it means. The state is here rather than in the view because it has to
+// outlive a mount — the view is torn down and rebuilt on every file that is
+// opened, and a sidebar that reopened itself each time would be a preference
+// the app kept forgetting.
+
+/// Tabler's "layout-sidebar". Static markup, as everywhere else.
+const SIDEBAR_ICON =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
+  + 'fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" '
+  + 'stroke-linejoin="round" aria-hidden="true" focusable="false">'
+  + '<path stroke="none" d="M0 0h24v24H0z" fill="none" />'
+  + '<path d="M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z" />'
+  + '<path d="M9 4v16" />'
+  + "</svg>";
+
+let sidebarOpen = true;
+
+const sidebarBtn = el("button", "chrome-btn");
+sidebarBtn.type = "button";
+sidebarBtn.innerHTML = SIDEBAR_ICON;
+document.getElementById("sidebar-slot")?.appendChild(sidebarBtn);
+
+function paintSidebarBtn() {
+  const name = sidebarOpen ? "Hide the properties sidebar" : "Show the properties sidebar";
+  sidebarBtn.title = name;
+  sidebarBtn.setAttribute("aria-label", name);
+  sidebarBtn.setAttribute("aria-pressed", String(sidebarOpen));
+  sidebarBtn.classList.toggle("on", sidebarOpen);
+}
+
+sidebarBtn.addEventListener("click", () => {
+  sidebarOpen = !sidebarOpen;
+  // `live` is the view's handle — the dispose function, with the view's
+  // capabilities hung off it. A mount that failed leaves it null and the
+  // button still flips, so the next mount opens in the state the user chose.
+  live?.setSidebar?.(sidebarOpen);
+  paintSidebarBtn();
+});
+
+paintSidebarBtn();
 
 /// Everything the shell knows. Not a class: there is exactly one of these, and
 /// a singleton with a constructor is a class pretending it might be two.
@@ -91,22 +138,64 @@ function paintChrome() {
   } catch { /* not fatal; the in-page title is the one being read */ }
 }
 
-/// Repaint the header. The view's contributions come first and the app's
-/// after, so the things that change with what is on screen stay next to each
-/// other and the app's own entries don't jump around as the view republishes.
+/// Everything that can be done, as viewActions.js descriptors: the view's
+/// contributions first and the app's after.
 ///
-/// renderActions diffs by id, so this may be called on every frame — and is,
-/// because the canvas republishes its zoom readout as you pinch.
+/// The app's four are the ones the view cannot have — they are a filesystem
+/// and a native dialog, which is exactly the line export.js's header draws.
+/// Until now they existed only as ⌘N / ⌘O / ⌘S / ⇧⌘S, which is to say they
+/// existed only for someone who had read files.js.
+const allActions = () => [
+  ...viewActions,
+  {
+    id: "app-new", group: "file", name: "New", shortcut: "⌘N",
+    title: "Start an empty drawing", run: newDocument,
+  },
+  {
+    id: "app-open", group: "file", name: "Open…", shortcut: "⌘O",
+    title: "Open an .excalidraw file", run: openDocument,
+  },
+  {
+    id: "app-save", group: "file", name: "Save", shortcut: "⌘S",
+    // Save As when there is nowhere to save yet, which is what the shortcut
+    // already does and what every other editor does.
+    title: "Save this drawing", run: saveDocument,
+  },
+  {
+    id: "app-save-as", group: "file", name: "Save As…", shortcut: "⇧⌘S",
+    title: "Save this drawing to a new file", run: saveDocumentAs,
+  },
+  ...exportActions({
+    getView: () => live,
+    docPath: () => doc.path,
+    report: setProblem,
+  }),
+];
+
+/// The menu reads `allActions` every time it opens, so it is always describing
+/// the document as it stands — Undo greyed when there is nothing to undo, the
+/// zoom entries acting on the camera as it is now.
+const menu = installMenu(document.getElementById("menu-slot"), { actions: allActions });
+
+/// The one line of trouble in the titlebar.
+///
+/// The app's own problem if there is one, otherwise whatever the view is
+/// reporting — the view publishes its failures as an error status among its
+/// actions, and a save that failed inside the view is the user's problem
+/// whichever half of the app noticed it.
+function paintStatus() {
+  const fromView = viewActions.find((a) => a?.kind === "status" && a.tone === "err");
+  const text = problem || fromView?.text || "";
+  statusEl.textContent = text;
+  statusEl.hidden = !text;
+}
+
+/// The view republishes on every frame of a pinch, so this is on the hot path.
+/// Both halves are cheap by construction: the status is two string compares,
+/// and the menu's refresh returns immediately unless it is open.
 function paintActions() {
-  renderActions(actionsHost, [
-    ...viewActions,
-    ...exportActions({
-      getView: () => live,
-      docPath: () => doc.path,
-      report: setProblem,
-    }),
-    ...(problem ? [{ id: "app-problem", kind: "status", text: problem, tone: "err" }] : []),
-  ]);
+  paintStatus();
+  menu.refresh();
 }
 
 function setProblem(message) {
@@ -129,6 +218,17 @@ function mount(text) {
   problem = "";
   live = mountView(host, text, {
     onSave: onViewSave,
+    // Where the app would like the tool island: in the titlebar, beside the
+    // document's name, which is where macOS puts a window's tools. The view
+    // treats this as a suggestion it happens to be able to honour — mounted
+    // without one, in a browser or in a term.hut pane, it floats the island
+    // over the canvas as before. Handing over an element rather than asking
+    // for the buttons keeps that decision the host's and the island the
+    // view's.
+    toolbarSlot: toolSlot,
+    // The sidebar opens in whatever state the toggle is in, so opening a file
+    // does not undo a choice the user made about the window.
+    sidebar: sidebarOpen,
     onActions: (list) => {
       viewActions = Array.isArray(list) ? list : [];
       paintActions();

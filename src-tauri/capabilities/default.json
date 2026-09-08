@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the editor window is allowed to reach. The file dialogs are the app's whole I/O surface; the drawing itself never touches the filesystem.",
+  "description": "What the editor window is allowed to reach. The file dialogs are the app's whole I/O surface; the drawing itself never touches the filesystem. set-theme is the appearance control in the titlebar telling macOS which appearance this window has, so the traffic lights and any OS-drawn sheet match the window they are attached to.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
+    "core:window:allow-set-theme",
     "core:event:default",
     "dialog:default",
     "opener:default"

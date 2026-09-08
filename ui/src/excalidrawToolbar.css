@@ -43,6 +43,43 @@
   font-family: var(--font-ui);
 }
 
+/* Hosted in a bar rather than floating over the canvas — the app's titlebar,
+ * or a pane header in term.hut. Everything that made it a card comes off: what
+ * is left is the buttons, in the host's own row, wearing the host's own
+ * background. The buttons themselves are untouched, so the active tool reads
+ * the same in both. */
+.xdt-island.xdt-inline {
+  position: static;
+  transform: none;
+  top: auto;
+  left: auto;
+  max-width: 100%;
+  /* Shrinkable, so a window too narrow for the bar compresses the tools into a
+     strip that scrolls (the base rule's overflow-x) instead of pushing them
+     out over the actions on the other side of the row. */
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  /* The bar is a drag region on macOS; the tools inside it must not be. */
+  -webkit-app-region: no-drag;
+}
+
+/* A little tighter in a bar: 32px squares are right for a card with nothing
+ * around it and too loose for a row that also holds a name and eight actions.
+ * 28px is still comfortably above the ~28px anyone actually misses. */
+.xdt-inline .xdt-btn { width: 1.75rem; height: 1.75rem; }
+.xdt-inline .xdt-sep { height: 1rem; margin: 0 0.1875rem; }
+
+/* The shortcut numeral goes. On a card floating over an empty canvas it is a
+ * free lesson; crammed into the corner of a 28px button in a window's titlebar
+ * it is nine pieces of 9px type competing with the icons they are printed on.
+ * The `title` still teaches the shortcut, which is where it was always
+ * actually learned. */
+.xdt-inline .xdt-key { display: none; }
+
 .xdt-btn {
   position: relative;
   flex: none;
