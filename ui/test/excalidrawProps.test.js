@@ -36,6 +36,7 @@ import {
   foldStyles, sectionsFor, freehandOnly, strokeWidthFor, strokeWidthKey,
   arrowheadFor, arrowheadKey,
 } from "../src/excalidrawProps.js";
+import { THEME_FILTER } from "../src/excalidrawScene.js";
 
 // --- The values Excalidraw actually writes -----------------------------------
 
@@ -302,7 +303,19 @@ class FakeEl {
     this.title = "";
     this.type = "";
     this.value = "";
-    this.style = {};
+    // A style object with the two shapes the code under test uses: plain
+    // property assignment (`style.background = ...`) and the custom-property
+    // API (`setProperty("--x", v)`), which is how the panel hands the swatches
+    // the filter their colour preview goes through. Setting a property to ""
+    // removes it, as the real CSSOM does.
+    this.style = {
+      setProperty(name, value) {
+        if (value === "" || value == null) delete this[name];
+        else this[name] = String(value);
+      },
+      removeProperty(name) { delete this[name]; },
+      getPropertyValue(name) { return this[name] ?? ""; },
+    };
     this.attributes = new Map();
     this.handlers = new Map(); // type -> [fn]
     this.classes = new Set();
@@ -393,6 +406,11 @@ function groupNamed(root, label) {
 }
 
 const controlsOf = (group) => group?.children.find((c) => c.classes.has("xdp-row"))?.children ?? [];
+
+/// The colour a swatch is actually showing. It lives on a child element rather
+/// than on the button because that child is what the preview filter is applied
+/// to — see `.xdp-fill` in excalidrawProps.css.
+const fillOf = (swatch) => swatch?.children.find((c) => c.classes.has("xdp-fill"));
 
 /// A button by its aria-label, which is the string the panel promises to a
 /// screen reader — worth selecting on precisely because it is load-bearing.
@@ -630,13 +648,50 @@ test("a colour outside the palette marks the custom swatch instead", () => {
   const m = mount({ strokeColor: "#123456" });
   const custom = byLabel(m.root(), "Stroke: custom color");
   expect(custom.classes.has("on")).toBe(true);
-  expect(custom.style.background).toBe("#123456");
+  expect(fillOf(custom).style.background).toBe("#123456");
   // And none of the presets claims it — a swatch that lit up for a colour it
   // does not hold would be a lie about what clicking it would do.
   const presets = controlsOf(groupNamed(m.root(), "Stroke"))
     .filter((n) => n.classes.has("xdp-swatch") && !n.classes.has("xdp-custom"));
   expect(presets).toHaveLength(STROKE_COLORS.length);
   expect(presets.filter((b) => b.classes.has("on"))).toHaveLength(0);
+  m.panel.dispose();
+});
+
+test("a swatch shows its colour on a child, not on the button", () => {
+  // The button carries the border and the selected ring; the child carries the
+  // colour, and only the child goes through the preview filter. Filtering the
+  // button would invert the ring along with the colour.
+  const m = mount();
+  const red = byLabel(m.root(), "Stroke: Red");
+  expect(fillOf(red).style.background).toBe("#e03131");
+  expect(red.style.background).toBeUndefined();
+  // Transparent has no colour to show, so the button's checkerboard — which is
+  // a pattern for "nothing here", not a colour — shows through unfiltered.
+  const none = byLabel(m.root(), "Background: Transparent");
+  expect(none.classes.has("xdp-none")).toBe(true);
+  expect(fillOf(none).style.background).toBeUndefined();
+  m.panel.dispose();
+});
+
+test("a dark-themed document previews its colours the way it will paint them", () => {
+  // The value written to the file does not change — #1e1e1e is still #1e1e1e,
+  // which is what Excalidraw writes — but a dark theme paints every colour
+  // through invert/hue-rotate, so a swatch showing the raw value advertises a
+  // colour that appears nowhere on the canvas.
+  const m = mount({}, { theme: "dark" });
+  expect(m.root().style.getPropertyValue("--xd-doc-filter")).toBe(THEME_FILTER);
+  expect(fillOf(byLabel(m.root(), "Stroke: Black")).style.background).toBe("#1e1e1e");
+
+  fire(byLabel(m.root(), "Theme: Light"), "click");
+  m.panel.refresh();
+  expect(m.root().style.getPropertyValue("--xd-doc-filter")).toBe("");
+  m.panel.dispose();
+});
+
+test("a panel with no theme to read asks for no preview filter", () => {
+  const m = mount();
+  expect(m.root().style.getPropertyValue("--xd-doc-filter")).toBe("");
   m.panel.dispose();
 });
 
@@ -750,7 +805,7 @@ test("a mixed colour does not light up the custom swatch either", () => {
   const custom = byLabel(m.root(), "Stroke: custom color");
   expect(custom.classes.has("on")).toBe(false);
   expect(custom.classes.has("xdp-none")).toBe(true);
-  expect(custom.style.background).toBe("");
+  expect(fillOf(custom).style.background).toBe("");
   m.panel.dispose();
 });
 

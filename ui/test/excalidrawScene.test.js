@@ -3,7 +3,7 @@ import rough from "../vendor/roughjs/rough.esm.js";
 import {
   parseScene, visibleElements, sceneBounds, elementBounds, fitTransform,
   strokeDash, cornerRadius, cornerRadiusFor, roughOptions, adjustedRoughness,
-  isPathALoop, applyDarkModeFilter, opacityOf, imageDataUrl,
+  isPathALoop, applyDarkModeFilter, THEME_FILTER, opacityOf, imageDataUrl,
   fontString, lineHeightPx, textLayout, isDrawn,
 } from "../src/excalidrawScene.js";
 
@@ -273,6 +273,14 @@ test("dark mode is off unless asked for, and then it is a per-colour transform",
   expect(applyDarkModeFilter("#ffffff", true)).toBe("#121212");
   // And a hue survives as its light counterpart rather than as mud.
   expect(applyDarkModeFilter("#e03131", true)).toBe("#ff8383");
+});
+
+test("the CSS spelling of the theme filter is the one the renderer applies", () => {
+  // The colour previews in the panel and the picker are filtered by CSS rather
+  // than recomputed, so this string and `applyDarkModeFilter` have to be the
+  // same transform. A swatch drifting from the canvas is the bug the whole
+  // preview exists to fix.
+  expect(THEME_FILTER).toBe("invert(93%) hue-rotate(180deg)");
 });
 
 test("dark mode keeps alpha, and leaves a colour it cannot read alone", () => {

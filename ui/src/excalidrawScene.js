@@ -56,6 +56,14 @@ const LINE_CONFIRM_THRESHOLD = 8;
 const DARK_MODE_INVERT_PERCENT = 93;
 const DARK_MODE_HUE_ROTATE_DEGREES = 180;
 
+/// The same pair written as a CSS `filter` list, for the parts of the UI that
+/// have to *preview* a colour rather than paint it — a swatch that claims to
+/// show what the canvas will show. Built from the constants above rather than
+/// spelled out again: a preview that drifts from the renderer is worse than no
+/// preview, because it is a confident wrong answer to "what colour is this?".
+export const THEME_FILTER =
+  `invert(${DARK_MODE_INVERT_PERCENT}%) hue-rotate(${DARK_MODE_HUE_ROTATE_DEGREES}deg)`;
+
 /// The shapes we draw. Anything else in a file (embeddables, iframes, magic
 /// frames) is a live web view in Excalidraw and can't be anything here, so it
 /// renders as a labelled placeholder instead of vanishing silently.

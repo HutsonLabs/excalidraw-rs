@@ -127,7 +127,15 @@ export function closeColorPicker() {
 // Open the picker next to `anchor` (a DOMRect), initialized from the color
 // text `color`. Every adjustment calls onChange(newText) — the caller writes
 // it into the document. Clicking the value line cycles hex → rgb → hsl.
-export function openColorPicker({ anchor, color, onChange, onClose }) {
+//
+// `previewFilter` is a CSS filter list — or "" for none — that the color
+// surfaces (the SV pad, the hue ramp, the alpha fill, the chip) are drawn
+// through. It is how a caller that displays colors through a transform keeps
+// the picker honest: the pad shows what the drawing will look like, not what
+// the file will say. The *values* are untouched — what onChange emits is still
+// the color the user's document stores — so the transform can never round-trip
+// through the picker and change the file.
+export function openColorPicker({ anchor, color, onChange, onClose, previewFilter = "" }) {
   closeColorPicker();
   const parsed = parseColor(color) ?? { r: 255, g: 255, b: 255, a: 1, kind: "hex", space: false };
   let { kind, space } = parsed;
@@ -138,6 +146,10 @@ export function openColorPicker({ anchor, color, onChange, onClose }) {
 
   const pop = document.createElement("div");
   pop.className = "color-picker";
+  // Read by the `filter` on each color surface, in whichever stylesheet styles
+  // `.color-picker`. Set on the popover rather than on each element so the
+  // stylesheet stays the one place that decides *which* surfaces are previews.
+  if (previewFilter) pop.style.setProperty("--xd-doc-filter", previewFilter);
   // Static skeleton, nothing interpolated.
   pop.innerHTML = `
     <div class="cp-sv"><div class="cp-thumb"></div></div>

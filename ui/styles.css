@@ -466,9 +466,33 @@ body {
  * The text overlay is a real <textarea> sitting over the canvas while a text
  * element is being edited, so it needs the same filter or the words change
  * colour the instant you stop typing. */
+:root[data-theme="dark"] {
+  --xd-view-filter: invert(93%) hue-rotate(180deg);
+}
+
 :root[data-theme="dark"] .xd-canvas,
 :root[data-theme="dark"] .xd-text-overlay {
-  filter: invert(93%) hue-rotate(180deg);
+  filter: var(--xd-view-filter);
+}
+
+/* The same filter, spelled once and inherited, is also what makes the colour
+ * UI honest. A swatch showing the value in the file rather than the colour on
+ * the canvas is the "why is my black stroke white?" bug: you pick black, the
+ * canvas inverts, and nothing in the sidebar ever said so. So every surface
+ * that *previews* a colour reads the same variable and comes out matching, and
+ * the picker's pad and chip do too — the colour under your thumb is the colour
+ * you get.
+ *
+ * Only the colour surfaces, never the popover itself: an inverted popover
+ * would be a light panel in a dark app. `.cp-alpha` keeps its checkerboard
+ * unfiltered for the same reason — it stands for "nothing here", not for a
+ * colour in the drawing. The document's own dark theme composes with this
+ * through `--xd-doc-filter`; see excalidrawProps.css. */
+.cp-sv,
+.cp-hue,
+.cp-alpha .cp-fill,
+.cp-chip-fill {
+  filter: var(--xd-doc-filter, brightness(1)) var(--xd-view-filter, brightness(1));
 }
 
 /* What a view says when it cannot show the file — a bad parse, an empty

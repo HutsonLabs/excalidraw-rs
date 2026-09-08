@@ -261,6 +261,24 @@ test("an empty drawing still paints its background", async () => {
   dispose();
 });
 
+test("a dark-themed drawing paints a dark-themed background", async () => {
+  // The elements of a dark-themed file are painted through the invert/hue-
+  // rotate pair, because the file stores the light colours. The background is
+  // stored the same way and has to go through the same transform: painted
+  // literally, a dark-themed drawing put its own near-white strokes on white.
+  const { dispose } = await mount(JSON.stringify({
+    type: "excalidraw",
+    version: 2,
+    elements: [],
+    appState: { viewBackgroundColor: "#ffffff", theme: "dark" },
+    files: {},
+  }));
+  const c = paintFrame();
+  expect(c.calls.some((call) => call[0] === "set:fillStyle" && call[1] === "#121212")).toBe(true);
+  expect(c.calls.some((call) => call[0] === "set:fillStyle" && call[1] === "#ffffff")).toBe(false);
+  dispose();
+});
+
 // --- the chrome half ---------------------------------------------------------
 //
 // Each of these is a separate branch in `paintChrome`, and none of them was

@@ -39,6 +39,7 @@
 // user means not reachable. They are wired through `actions`, not `setStyle`,
 // because none of them is a field on an element.
 import { openColorPicker, closeColorPicker } from "./colorpicker.js";
+import { THEME_FILTER } from "./excalidrawScene.js";
 import { el, div } from "./dom.js";
 import { setPressed } from "./a11y.js";
 
@@ -766,6 +767,24 @@ export function renderProps(host, {
   /// sloppiness uses it, and only for `{ resketch: true }`.
   const emit = (patch, opts) => setStyle?.(patch, opts);
 
+  /// The transform the renderer will put this document's colours through, as a
+  /// CSS filter — `THEME_FILTER` for a dark-themed document, nothing for a
+  /// light one.
+  ///
+  /// This is what makes the swatches honest. A colour row writes the file's
+  /// value (`#1e1e1e` stays `#1e1e1e`, which is what Excalidraw would write),
+  /// but a dark-themed document is *painted* through the invert/hue-rotate pair
+  /// (`applyDarkModeFilter`), so the swatch showing the raw value is showing a
+  /// colour that appears nowhere on the canvas. Displaying the value through
+  /// the same transform the canvas uses means the square you click is the
+  /// colour you get.
+  ///
+  /// The app's own light/dark appearance is the second half of the same
+  /// problem and is handled the same way, one level up: it filters the canvas
+  /// element in CSS, and the stylesheet hands the swatches `--xd-view-filter`
+  /// so they compose in the same order.
+  const docFilter = () => ((getTheme?.() ?? "light") === "dark" ? THEME_FILTER : "");
+
   /// The kinds a patch would land on, and how many things are selected. Both
   /// come from the same accessor: an entry per selected element, so its length
   /// is the selection size. `hasSelection` is the fallback for a host that has
@@ -866,8 +885,13 @@ export function renderProps(host, {
       const name = COLOR_NAMES[color] ?? color;
       b.title = name;
       b.setAttribute("aria-label", `${label}: ${name}`);
+      // The colour goes on a child, not on the button: the button also carries
+      // the border and the selected ring, and those are chrome — they must not
+      // go through the preview filter that makes the fill match the canvas.
+      const fill = div("xdp-fill");
+      b.appendChild(fill);
       if (isTransparent(color)) b.classList.add("xdp-none");
-      else b.style.background = color;
+      else fill.style.background = color;
       setPressed(b, false);
       on(b, "click", () => write(color));
       row.appendChild(b);
@@ -878,6 +902,8 @@ export function renderProps(host, {
 
     const custom = el("button", "xdp-swatch xdp-custom");
     custom.type = "button";
+    const customFill = div("xdp-fill");
+    custom.appendChild(customFill);
     custom.title = "Custom…";
     custom.setAttribute("aria-label", `${label}: custom color`);
     on(custom, "click", () => {
@@ -891,6 +917,9 @@ export function renderProps(host, {
       const current = read(style());
       openColorPicker({
         anchor: custom.getBoundingClientRect(),
+        // The pad and the chip show colours the way the canvas will, so the
+        // colour under the thumb is the colour that lands in the drawing.
+        previewFilter: docFilter(),
         // A mixed selection has no colour to open on, and a symbol is not one:
         // start from white, the same place a transparent background starts from.
         color: current === MIXED || isTransparent(current) ? "#ffffff" : current,
@@ -927,10 +956,10 @@ export function renderProps(host, {
       custom.classList.toggle("on", !mixed && !preset);
       if (mixed || isTransparent(current)) {
         custom.classList.add("xdp-none");
-        custom.style.background = "";
+        customFill.style.background = "";
       } else {
         custom.classList.remove("xdp-none");
-        custom.style.background = current;
+        customFill.style.background = current;
       }
     });
     return node;
@@ -1212,6 +1241,8 @@ export function renderProps(host, {
     // states, and it is worth having: without it, setting a default reads as
     // editing a shape that isn't there.
     heading.textContent = selected ? "Selected" : "New shape";
+    // Before the syncs: every colour fill in the panel reads this.
+    root.style.setProperty("--xd-doc-filter", docFilter());
     const s = style();
     for (const sync of syncs) sync(s);
 

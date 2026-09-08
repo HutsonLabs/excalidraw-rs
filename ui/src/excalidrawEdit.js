@@ -61,7 +61,9 @@ import {
   chromeTheme, drawElement, drawHandles, drawMarquee, drawPointHandles, drawSelectionOutline,
   drawSnapGuides, HANDLE_SIZE, HANDLES,
 } from "./excalidrawView.js";
-import { fontString, imageDataUrl, lineHeightPx, opacityOf } from "./excalidrawScene.js";
+import {
+  applyDarkModeFilter, fontString, imageDataUrl, lineHeightPx, opacityOf,
+} from "./excalidrawScene.js";
 import {
   clipboardText, drawingSource, fileStyle, openMessage, parseClipboard, strokeWidthPx,
   stylePatch, styleFor, styleFrom, textBox, worthSaving, DEFAULT_STYLE, mergeStyle,
@@ -586,8 +588,14 @@ export function renderExcalidraw(host, text, {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     // The scene's own background, not the app's: a drawing authored on white
-    // is unreadable composited onto a dark pane.
-    ctx.fillStyle = scene.appState?.viewBackgroundColor || "#ffffff";
+    // is unreadable composited onto a dark pane. Filtered for the document's
+    // theme exactly as every element is (excalidrawView.js's `drawElement`), so
+    // a dark-themed file's inverted strokes land on an inverted background
+    // instead of a white one.
+    ctx.fillStyle = applyDarkModeFilter(
+      scene.appState?.viewBackgroundColor || "#ffffff",
+      scene.appState?.theme === "dark",
+    );
     ctx.fillRect(0, 0, w, h);
     ctx.translate(camera.x, camera.y);
     ctx.scale(camera.scale, camera.scale);

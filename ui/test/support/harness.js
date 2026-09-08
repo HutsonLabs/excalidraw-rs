@@ -91,7 +91,19 @@ export class FakeNode {
     this.tagName = String(tag).toUpperCase();
     this.children = [];
     this.parentNode = null;
-    this.style = {};
+    // A style object with the two shapes the code under test uses: plain
+    // property assignment (`style.background = ...`) and the custom-property
+    // API (`setProperty("--x", v)`), which is how the panel hands the swatches
+    // the filter their colour preview goes through. Setting a property to ""
+    // removes it, as the real CSSOM does.
+    this.style = {
+      setProperty(name, value) {
+        if (value === "" || value == null) delete this[name];
+        else this[name] = String(value);
+      },
+      removeProperty(name) { delete this[name]; },
+      getPropertyValue(name) { return this[name] ?? ""; },
+    };
     this.dataset = {};
     this.classList = {
       add: () => {},

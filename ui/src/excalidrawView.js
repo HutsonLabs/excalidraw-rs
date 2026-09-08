@@ -102,8 +102,14 @@ export function renderExcalidrawCanvas(host, scene, { onActions } = {}) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     // The scene's own background, not the app's: a diagram authored on white
-    // is unreadable composited onto a dark pane.
-    ctx.fillStyle = scene.appState?.viewBackgroundColor || "#ffffff";
+    // is unreadable composited onto a dark pane. Through the same dark-theme
+    // transform the elements go through, for the same reason: a file authored
+    // in dark mode stores the *light* background, and painting it literally put
+    // the drawing's own inverted strokes on white — invisible.
+    ctx.fillStyle = applyDarkModeFilter(
+      scene.appState?.viewBackgroundColor || "#ffffff",
+      scene.appState?.theme === "dark",
+    );
     ctx.fillRect(0, 0, w, h);
     ctx.translate(view.offsetX, view.offsetY);
     ctx.scale(view.scale, view.scale);
