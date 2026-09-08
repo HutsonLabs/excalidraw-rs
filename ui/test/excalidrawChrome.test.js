@@ -13,8 +13,9 @@
 
 import { test, expect } from "bun:test";
 import {
-  HANDLE_SIZE, ROTATE_OFFSET, HANDLES, chromeTheme, handlePositions,
-  drawSelectionOutline, drawHandles, drawMarquee, drawSnapGuides,
+  HANDLE_SIZE, ROTATE_OFFSET, HANDLES, HANDLES_WITH_ROTATE, chromeTheme,
+  handlePositions, drawSelectionOutline, drawHandles, drawPointHandles,
+  drawMarquee, drawSnapGuides,
 } from "../src/excalidrawView.js";
 // The recording context is shared with contract.test.js and
 // excalidrawPaint.test.js. It used to live here; three copies of one fake had
@@ -101,6 +102,127 @@ test("`only` narrows the set — a line has no meaningful corners", () => {
   drawHandles(ctx, box, { scale: 1, only: ["w", "e"] });
   expect(of(ctx, "rect")).toHaveLength(2);
   expect(of(ctx, "arc")).toHaveLength(0);
+});
+
+// --- letting the model say where the handles are ------------------------------
+
+test("supplied points are drawn instead of recomputed ones", () => {
+  // `doc.handlePoints()` is the same nine positions worked out by the code that
+  // also hit-tests them. Until something passes them in, this file and
+  // geometry.rs agree only because both hard-code the same 20px rotate offset —
+  // a coincidence maintained by hand. Deliberately absurd coordinates here, so
+  // a fallback to handlePositions could not possibly pass.
+  const points = HANDLES_WITH_ROTATE.map((_, i) => ({ x: 1000 + i, y: 2000 + i }));
+  const ctx = recorder();
+  drawHandles(ctx, box, { scale: 1, points });
+
+  const squares = of(ctx, "rect");
+  expect(squares).toHaveLength(8);
+  // Centres, recovered from the top-left corner the rect was drawn at.
+  expect(squares.map((c) => [c[1] + HANDLE_SIZE / 2, c[2] + HANDLE_SIZE / 2]))
+    .toEqual(points.slice(0, 8).map((p) => [p.x, p.y]));
+  // And the ninth is still the circle, at the ninth position.
+  const [arc] = of(ctx, "arc");
+  expect([arc[1], arc[2]]).toEqual([points[8].x, points[8].y]);
+});
+
+test("supplied points get their names from the order the model returns them in", () => {
+  // handlePoints() is `[{x, y}]` with no names, and `only` plus the rotate
+  // stalk both key off the name — so the zip has to happen inside drawHandles,
+  // or every caller has to know that geometry::Handle discriminates nw, n, ne,
+  // e, se, s, sw, w, rotate in that order.
+  const points = HANDLES_WITH_ROTATE.map((_, i) => ({ x: 1000 + i, y: 2000 + i }));
+  const ctx = recorder();
+  drawHandles(ctx, box, { scale: 1, points, only: ["nw", "rotate"] });
+  const squares = of(ctx, "rect");
+  expect(squares).toHaveLength(1);
+  expect([squares[0][1] + HANDLE_SIZE / 2, squares[0][2] + HANDLE_SIZE / 2])
+    .toEqual([points[0].x, points[0].y]);
+  expect(of(ctx, "arc")).toHaveLength(1);
+
+  // The stalk runs from "n" to "rotate", which means it uses the supplied
+  // positions too rather than falling back to the box.
+  const full = recorder();
+  drawHandles(full, box, { scale: 1, points });
+  const [move] = of(full, "moveTo");
+  const [line] = of(full, "lineTo");
+  expect([move[1], move[2]]).toEqual([points[1].x, points[1].y]);
+  expect([line[1], line[2]]).toEqual([points[8].x, points[8].y]);
+});
+
+// --- a linear element's own points --------------------------------------------
+//
+// The sibling of drawHandles, and the reason it is a sibling: these have no
+// names and there are as many of them as the line has points. It is also the
+// chrome the headline bug turned on — binding always worked, but an endpoint
+// that cannot be picked up cannot be re-aimed.
+
+const linePoints = [{ x: 1000, y: 2000 }, { x: 1100, y: 2050 }, { x: 1200, y: 1900 }];
+
+test("a line's points are drawn where they are, not where a box would be", () => {
+  // Same technique as the drawHandles tests above: coordinates nowhere near
+  // any bounding box, so a fallback to box-derived positions cannot pass.
+  const ctx = recorder();
+  drawPointHandles(ctx, linePoints, { scale: 1 });
+  const arcs = of(ctx, "arc");
+  expect(arcs.map((c) => [c[1], c[2]])).toEqual(linePoints.map((p) => [p.x, p.y]));
+  // One circle per point, and no squares — these are not resize handles.
+  expect(of(ctx, "rect")).toHaveLength(0);
+});
+
+test("a point handle is the same size on screen at every zoom", () => {
+  // The rule the whole section is organised around, and the one that decides
+  // whether an endpoint is grabbable when you have zoomed out to see the
+  // diagram.
+  for (const scale of [0.25, 1, 4]) {
+    const ctx = recorder();
+    drawPointHandles(ctx, linePoints, { scale });
+    expect(of(ctx, "arc")[0][3]).toBeCloseTo(HANDLE_SIZE / 2 / scale, 10);
+    expect(ctx.lineWidth).toBeCloseTo(1 / scale, 10);
+  }
+});
+
+test("a midpoint is hollow and smaller, because clicking it makes a point", () => {
+  // The two kinds have to be told apart at a glance: one moves a point that
+  // exists, the other adds one that does not.
+  const solid = recorder();
+  drawPointHandles(solid, linePoints, { scale: 1 });
+  expect(of(solid, "fill")).toHaveLength(linePoints.length);
+
+  const hollow = recorder();
+  drawPointHandles(hollow, linePoints, { scale: 1, filled: false, size: HANDLE_SIZE * 0.75 });
+  expect(of(hollow, "fill")).toHaveLength(0);
+  expect(of(hollow, "stroke")).toHaveLength(linePoints.length);
+  expect(of(hollow, "arc")[0][3]).toBeCloseTo(HANDLE_SIZE * 0.75 / 2, 10);
+});
+
+test("no points means no calls at all, not a circle at the origin", () => {
+  for (const points of [null, undefined, []]) {
+    const ctx = recorder();
+    drawPointHandles(ctx, points, { scale: 1 });
+    expect(ctx.calls).toHaveLength(0);
+  }
+});
+
+test("point handles take the passed theme, like the rest of the chrome", () => {
+  const ctx = recorder();
+  drawPointHandles(ctx, linePoints, {
+    scale: 1, colors: { accent: "#ff0000", handleFill: "#00ff00" },
+  });
+  expect(ctx.strokeStyle).toBe("#ff0000");
+  expect(ctx.fillStyle).toBe("#00ff00");
+});
+
+test("a multi-selection can hide the rotate handle by name", () => {
+  // Excalidraw hides it, and this repo's ops::rotate treats the absolute
+  // pointer bearing as a delta — so a reachable rotate handle on a
+  // multi-selection is a bug you can hit. `only: HANDLES` is the mitigation.
+  const ctx = recorder();
+  drawHandles(ctx, box, { scale: 1, only: HANDLES });
+  expect(of(ctx, "rect")).toHaveLength(8);
+  expect(of(ctx, "arc")).toHaveLength(0);
+  // And no stalk to a handle that is not there.
+  expect(of(ctx, "moveTo")).toHaveLength(0);
 });
 
 // --- rotation ----------------------------------------------------------------

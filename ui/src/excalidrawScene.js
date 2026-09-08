@@ -26,7 +26,8 @@
 // what the painter needs and nothing else has an opinion about.
 //
 // Four functions are not staying. `elementBounds`, `sceneBounds`,
-// `fitTransform` and `cornerRadius` are geometry, and geometry belongs to
+// `fitTransform` and `cornerRadius` (with its `cornerRadiusFor` rule, which the
+// rounded diamond needs per axis) are geometry, and geometry belongs to
 // xd-core (PLAN.md Phase 2) — because once the editor can move a shape, the
 // model has to agree with the painter about where that shape *is*, and two
 // implementations of "where" is a bug waiting for a rotation. Phase 2 ports
@@ -47,6 +48,13 @@ const ROUNDNESS_ADAPTIVE = 3;
 /// ROUGHNESS.cartoonist — at or above this, Rough.js is allowed to wander off
 /// the vertices, which is what makes the sketchiest setting look sketchy.
 const ROUGHNESS_CARTOONIST = 2;
+/// LINE_CONFIRM_THRESHOLD (constants.ts:21) — how near its own start a path's
+/// end has to land before Excalidraw calls it a loop and fills it.
+const LINE_CONFIRM_THRESHOLD = 8;
+/// The invert/hue-rotate pair Excalidraw's dark theme is defined as
+/// (colors.ts:16-17).
+const DARK_MODE_INVERT_PERCENT = 93;
+const DARK_MODE_HUE_ROTATE_DEGREES = 180;
 
 /// The shapes we draw. Anything else in a file (embeddables, iframes, magic
 /// frames) is a live web view in Excalidraw and can't be anything here, so it
@@ -54,6 +62,23 @@ const ROUGHNESS_CARTOONIST = 2;
 const DRAWN = new Set([
   "rectangle", "diamond", "ellipse", "line", "arrow", "freedraw", "text", "image", "frame",
 ]);
+
+/// Excalidraw's own type predicates, because three separate rules below key off
+/// them and each one is a different set. Ports of typeChecks.ts:152-158 and
+/// comparisons.ts:49-55.
+///
+/// `isLinear` is line and arrow only — *not* freedraw. Upstream has the
+/// `|| freedraw` clause written out and commented off (typeChecks.ts:156), and
+/// the difference is load-bearing for adjustedRoughness below.
+const isLinear = (type) => type === "arrow" || type === "line";
+const canChangeRoundness = (type) =>
+  type === "rectangle" || type === "iframe" || type === "embeddable"
+  || type === "line" || type === "diamond" || type === "image";
+/// The types generateRoughOptions fills unconditionally (shape.ts:225-241).
+/// A line or freedraw fills only when its path closes; an arrow never does.
+const isFillableShape = (type) =>
+  type === "rectangle" || type === "iframe" || type === "embeddable"
+  || type === "diamond" || type === "ellipse";
 
 /// Fonts. We don't vendor Excalidraw's (13 MB, most of it a CJK handwriting
 /// face), so each family maps to the nearest stack the machine already has.
@@ -211,10 +236,12 @@ export function strokeDash(strokeStyle, strokeWidth) {
 /// getCornerRadius. Two schemes: legacy files scale the radius with the shape,
 /// current ones use a fixed radius until the shape gets small enough that it
 /// would look wrong, then fall back to proportional.
-export function cornerRadius(element) {
+/// getCornerRadius takes an arbitrary length, not the shape's short side: a
+/// rounded diamond needs one radius per axis (shape.ts:827-834), so the rule and
+/// the "which length" question are two functions rather than one.
+export function cornerRadiusFor(x, element) {
   const r = element?.roundness;
   if (!r) return 0;
-  const x = Math.min(Math.abs(num(element.width)), Math.abs(num(element.height)));
   if (r.type === ROUNDNESS_PROPORTIONAL) return x * DEFAULT_PROPORTIONAL_RADIUS;
   if (r.type !== ROUNDNESS_ADAPTIVE) return 0;
   const fixed = num(r.value, DEFAULT_ADAPTIVE_RADIUS);
@@ -222,30 +249,206 @@ export function cornerRadius(element) {
   return x <= cutoff ? x * DEFAULT_PROPORTIONAL_RADIUS : fixed;
 }
 
+/// The radius a rounded *rectangle* gets: the rule above applied to the short
+/// side, which is what Excalidraw passes for a box (shape.ts:775).
+export function cornerRadius(element) {
+  return cornerRadiusFor(
+    Math.min(Math.abs(num(element?.width)), Math.abs(num(element?.height))),
+    element,
+  );
+}
+
+/// True when a linear path comes back to where it started, which is the only
+/// case Excalidraw fills a line or a pencil stroke (utils.ts:510-524). An arrow
+/// is never filled, whatever its points do.
+export function isPathALoop(points, tolerance = LINE_CONFIRM_THRESHOLD) {
+  if (!Array.isArray(points) || points.length < 3) return false;
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (!Array.isArray(first) || !Array.isArray(last)) return false;
+  return Math.hypot(num(last[0]) - num(first[0]), num(last[1]) - num(first[1])) <= tolerance;
+}
+
+// --- dark mode ---------------------------------------------------------------
+//
+// Excalidraw's dark theme is not a second palette: every element colour is put
+// through the transform `filter: invert(93%) hue-rotate(180deg)` describes,
+// per colour, in JS (colors.ts:62-122). So a file authored in dark mode holds
+// the *light* colours and both themes are the same document — which is exactly
+// why this has to be a port and not an approximation. Painting elements at
+// their literal colours makes a dark-authored diagram look right here and
+// wrong on excalidraw.com, or the reverse.
+
+/// #RRGGBB (or #RRGGBBAA when the colour carries alpha), the way Excalidraw
+/// writes colours back out (colors.ts:329-345).
+const rgbToHex = (r, g, b, a) => {
+  const hex6 = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+  if (a === undefined || a >= 1) return hex6;
+  return `${hex6}${Math.round(a * 255).toString(16).padStart(2, "0")}`;
+};
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/// `[r, g, b, a]` with r/g/b in 0–255 and a in 0–1, or null for a colour we
+/// can't read. Excalidraw parses with tinycolor; the formats that actually
+/// reach a file are hex and — because this repo's own picker can emit them
+/// (colorpicker.js:103-114) — the rgb()/rgba() functions.
+function parseColor(input) {
+  const s = String(input ?? "").trim();
+  if (!s || s.toLowerCase() === "transparent") return null;
+  const hex = /^#([0-9a-f]+)$/i.exec(s);
+  if (hex) {
+    const h = hex[1];
+    const wide = h.length === 3 || h.length === 4;
+    if (!wide && h.length !== 6 && h.length !== 8) return null;
+    const at = (i) => parseInt(wide ? h[i] + h[i] : h.slice(i * 2, i * 2 + 2), 16);
+    const hasAlpha = wide ? h.length === 4 : h.length === 8;
+    return [at(0), at(1), at(2), hasAlpha ? at(3) / 255 : 1];
+  }
+  const fn = /^rgba?\(([^)]*)\)$/i.exec(s);
+  if (!fn) return null;
+  // Both the legacy comma form and the modern `r g b / a` one.
+  const parts = fn[1].split(/[\s,/]+/).filter(Boolean);
+  if (parts.length < 3) return null;
+  const chan = (v) => (v.endsWith("%") ? (parseFloat(v) / 100) * 255 : parseFloat(v));
+  const rgb = parts.slice(0, 3).map(chan);
+  if (rgb.some((v) => !Number.isFinite(v))) return null;
+  const raw = parts[3] === undefined ? 1
+    : parts[3].endsWith("%") ? parseFloat(parts[3]) / 100 : parseFloat(parts[3]);
+  return [
+    ...rgb.map((v) => Math.round(clamp(v, 0, 255))),
+    Number.isFinite(raw) ? clamp(raw, 0, 1) : 1,
+  ];
+}
+
+/// `invert(p%)` on one channel: the CSS blend, not a flip (colors.ts:62-85).
+const invertChannel = (c, p) => Math.round(clamp(c * (1 - p) + (255 - c) * p, 0, 255));
+
+/// `hue-rotate(deg)`, the feColorMatrix the filter spec defines, applied in
+/// sRGB the way the CSS shorthand does (colors.ts:19-60).
+function hueRotate(red, green, blue, degrees) {
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const a = (degrees * Math.PI) / 180;
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const m = [
+    0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928,
+    0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.14, 0.072 - c * 0.072 - s * 0.283,
+    0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072,
+  ];
+  const out = [
+    r * m[0] + g * m[1] + b * m[2],
+    r * m[3] + g * m[4] + b * m[5],
+    r * m[6] + g * m[7] + b * m[8],
+  ];
+  return out.map((v) => Math.round(clamp(v, 0, 1) * 255));
+}
+
+/// Memoised, like Excalidraw's (colors.ts:12-14): the option mapping runs for
+/// every element on every frame, and there are only ever a handful of colours
+/// in a drawing.
+const darkModeCache = new Map();
+
+/// The colour Excalidraw's dark theme would have painted `color` as.
+///
+/// A colour this can't parse — a CSS keyword, a gradient — comes back unchanged.
+/// Leaving it alone is worse than filtering it and better than guessing.
+export function applyDarkModeFilter(color, isDarkMode = true) {
+  if (!isDarkMode) return color;
+  const cached = darkModeCache.get(color);
+  if (cached !== undefined) return cached;
+  const rgba = parseColor(color);
+  let out = color;
+  if (rgba) {
+    // Order matters: invert, then rotate. That is the order the CSS filter
+    // list runs in, and the two do not commute.
+    const p = clamp(DARK_MODE_INVERT_PERCENT, 0, 100) / 100;
+    const [r, g, b] = hueRotate(
+      invertChannel(rgba[0], p), invertChannel(rgba[1], p), invertChannel(rgba[2], p),
+      DARK_MODE_HUE_ROTATE_DEGREES,
+    );
+    out = rgbToHex(r, g, b, rgba[3]);
+  }
+  darkModeCache.set(color, out);
+  return out;
+}
+
 /// The Rough.js options Excalidraw would have drawn this element with — a port
 /// of its generateRoughOptions(). Getting this right is most of the fidelity:
 /// the same seed with different options is still a different drawing.
-export function roughOptions(element, { continuousPath = false } = {}) {
+/// Excalidraw's adjustRoughness (shape.ts:171-191): a small shape at Cartoonist
+/// looks wrecked rather than sketchy, because Rough's wander is an absolute
+/// number of pixels and a 30x10 box has no pixels to spare. So the roughness a
+/// small element is drawn with is damped by its size.
+///
+/// The three escapes are upstream's: both sides comfortably big, or a rounded
+/// shape at least 15px on its short side (which is why Excalidraw's rounded
+/// rectangles keep their full sketchiness), or a linear element long enough to
+/// carry it.
+export function adjustedRoughness(element) {
+  const roughness = num(element?.roughness, 1);
+  const w = Math.abs(num(element?.width));
+  const h = Math.abs(num(element?.height));
+  const maxSize = Math.max(w, h);
+  const minSize = Math.min(w, h);
+  if (
+    (minSize >= 20 && maxSize >= 50)
+    || (minSize >= 15 && !!element?.roundness && canChangeRoundness(element?.type))
+    || (isLinear(element?.type) && maxSize >= 50)
+  ) {
+    return roughness;
+  }
+  return Math.min(roughness / (maxSize < 10 ? 3 : 2), 2.5);
+}
+
+export function roughOptions(element, { continuousPath = false, isDarkMode = false } = {}) {
   const strokeWidth = num(element.strokeWidth, 1);
   const solid = element.strokeStyle === "solid" || element.strokeStyle == null;
   const roughness = num(element.roughness, 1);
   const options = {
-    seed: num(element.seed, 1),
+    // Rough falls back to Math.random() on seed 0 (`this.seed ? … :
+    // Math.random()`), which re-scrambles the shape on every repaint. The core
+    // can't mint a 0, but a hand-authored file can.
+    seed: num(element.seed, 1) || 1,
     strokeLineDash: strokeDash(element.strokeStyle, strokeWidth),
     // A dashed line drawn twice (Rough's default) smears its gaps shut.
     disableMultiStroke: !solid,
     strokeWidth: solid ? strokeWidth : strokeWidth + 0.5,
     fillWeight: strokeWidth / 2,
     hachureGap: strokeWidth * 4,
-    roughness,
-    stroke: element.strokeColor || "#1e1e1e",
+    roughness: adjustedRoughness(element),
+    stroke: applyDarkModeFilter(element.strokeColor || "#1e1e1e", isDarkMode),
     // Let the sketchiest setting actually miss the corners; keep the tidier
     // ones anchored, or long paths drift visibly away from their endpoints.
+    //
+    // Keyed off the *raw* roughness, not the damped one: shape.ts:221 computes
+    // the adjusted value for `roughness` and :224 compares the untouched field,
+    // so a small shape whose roughness was halved to 1 still gets to wander.
     preserveVertices: continuousPath || roughness < ROUGHNESS_CARTOONIST,
   };
-  if (element.backgroundColor && element.backgroundColor !== "transparent") {
-    options.fill = element.backgroundColor;
+
+  // Which elements get a fill is per-type, not "does it have a background"
+  // (shape.ts:225-256). A background colour on an arrow fills nothing in
+  // Excalidraw, and on a line only when the line closes on itself — so
+  // honouring it everywhere paints shapes that exist in no other renderer.
+  const opaque = element.backgroundColor && element.backgroundColor !== "transparent";
+  const type = element.type;
+  const loop = (type === "line" || type === "freedraw") && isPathALoop(element.points);
+  // Upstream's switch throws on a type it doesn't list; a renderer can't, so an
+  // unrecognised type keeps the old permissive rule rather than losing its fill.
+  const known = isFillableShape(type) || type === "line" || type === "freedraw" || type === "arrow";
+  if (isFillableShape(type) || loop || !known) {
     options.fillStyle = element.fillStyle || "hachure";
+    if (opaque) options.fill = applyDarkModeFilter(element.backgroundColor, isDarkMode);
+  }
+  if (type === "ellipse") {
+    // Rough's default curveFitting is 0.95, and it spends the slack on
+    // `rx += randOffset(rx * (1 - curveFitting))` — so an unpinned ellipse
+    // shrinks as roughness rises and pulls inside its own selection box
+    // (shape.ts:237-239).
+    options.curveFitting = 1;
   }
   return options;
 }

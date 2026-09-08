@@ -2,7 +2,8 @@ import { test, expect } from "bun:test";
 import rough from "../vendor/roughjs/rough.esm.js";
 import {
   parseScene, visibleElements, sceneBounds, elementBounds, fitTransform,
-  strokeDash, cornerRadius, roughOptions, opacityOf, imageDataUrl,
+  strokeDash, cornerRadius, cornerRadiusFor, roughOptions, adjustedRoughness,
+  isPathALoop, applyDarkModeFilter, opacityOf, imageDataUrl,
   fontString, lineHeightPx, textLayout, isDrawn,
 } from "../src/excalidrawScene.js";
 
@@ -136,6 +137,16 @@ test("a sharp-cornered shape has no radius", () => {
   expect(cornerRadius(rect({ roundness: null }))).toBe(0);
 });
 
+test("the radius rule takes a length, because a diamond needs one per axis", () => {
+  // cornerRadius() is the rule applied to the short side; a rounded diamond
+  // measures its two insets along different runs (shape.ts:827-834), so the two
+  // have to be separable. Same shape, three answers.
+  const d = rect({ type: "diamond", roundness: { type: 2 }, width: 200, height: 80 });
+  expect(cornerRadius(d)).toBe(20);              // min(200, 80) x 0.25
+  expect(cornerRadiusFor(100, d)).toBe(25);      // half the width
+  expect(cornerRadiusFor(40, d)).toBe(10);       // half the height
+});
+
 test("a non-solid stroke is drawn once, not twice", () => {
   // Rough's default double stroke smears a dashed line's gaps shut.
   expect(roughOptions(rect({ strokeStyle: "dashed" })).disableMultiStroke).toBe(true);
@@ -155,13 +166,132 @@ test("hachure density and fill weight follow the stroke width", () => {
   expect(o.hachureGap).toBe(16);
 });
 
+test("which elements a background actually fills is per-type, not universal", () => {
+  // shape.ts:225-256. A background colour on an arrow fills nothing in
+  // Excalidraw, and on a line only when the line closes on itself — so
+  // honouring it everywhere paints shapes that exist in no other renderer.
+  const bg = { backgroundColor: "#ffc9c9", fillStyle: "solid" };
+  const open = [[0, 0], [50, 0], [50, 50]];
+  const closed = [[0, 0], [50, 0], [50, 50], [2, 1]]; // ends within 8px of its start
+
+  expect(roughOptions(rect({ ...bg })).fill).toBe("#ffc9c9");
+  expect(roughOptions(rect({ ...bg, type: "diamond" })).fill).toBe("#ffc9c9");
+  expect(roughOptions(rect({ ...bg, type: "ellipse" })).fill).toBe("#ffc9c9");
+
+  expect(roughOptions(rect({ ...bg, type: "arrow", points: closed })).fill).toBeUndefined();
+  expect(roughOptions(rect({ ...bg, type: "line", points: open })).fill).toBeUndefined();
+  expect(roughOptions(rect({ ...bg, type: "line", points: closed })).fill).toBe("#ffc9c9");
+  expect(roughOptions(rect({ ...bg, type: "freedraw", points: closed })).fill).toBe("#ffc9c9");
+});
+
+test("a path counts as a loop when its end lands within Excalidraw's threshold", () => {
+  // LINE_CONFIRM_THRESHOLD is 8px (constants.ts:21), and two points can never
+  // be a loop however close they are (utils.ts:515).
+  expect(isPathALoop([[0, 0], [50, 0], [8, 0]])).toBe(true);
+  expect(isPathALoop([[0, 0], [50, 0], [9, 0]])).toBe(false);
+  expect(isPathALoop([[0, 0], [0, 0]])).toBe(false);
+  expect(isPathALoop(undefined)).toBe(false);
+});
+
 test("only the sketchiest roughness is allowed to miss its vertices", () => {
   expect(roughOptions(rect({ roughness: 0 })).preserveVertices).toBe(true);
   expect(roughOptions(rect({ roughness: 1 })).preserveVertices).toBe(true);
   expect(roughOptions(rect({ roughness: 2 })).preserveVertices).toBe(false);
-  // A long path stays anchored whatever its roughness, or it drifts off its
-  // own endpoints.
+  // A shape drawn as a multi-segment path() stays anchored whatever its
+  // roughness, because each segment's endpoints wander independently and the
+  // corners would come apart. Which shapes those are is a property of the call
+  // site, not of the element — excalidrawPaint.test.js pins the call sites.
   expect(roughOptions(rect({ roughness: 2 }), { continuousPath: true }).preserveVertices).toBe(true);
+});
+
+test("preserveVertices reads the raw roughness, not the size-damped one", () => {
+  // shape.ts:221 computes the adjusted value for `roughness` and :224 compares
+  // the untouched field. A small shape whose roughness is halved from 2 to 1
+  // still gets to miss its vertices, and matching that is the difference
+  // between a faithful sketch and a tidier-looking one.
+  const small = rect({ roughness: 2, width: 40, height: 30 });
+  expect(roughOptions(small).roughness).toBe(1);
+  expect(roughOptions(small).preserveVertices).toBe(false);
+});
+
+test("roughness is damped by the shape's size, the way Excalidraw damps it", () => {
+  // adjustRoughness (shape.ts:171-191). Without this a small shape gets 2-3x
+  // the roughness Excalidraw would give it and reads as wrecked rather than
+  // sketchy. The reference column is measured against upstream.
+  const at = (over) => [
+    adjustedRoughness({ type: "rectangle", roughness: 1, ...over }),
+    adjustedRoughness({ type: "rectangle", roughness: 2, ...over }),
+  ];
+  expect(at({ width: 200, height: 120 })).toEqual([1, 2]);        // both sides big
+  expect(at({ width: 40, height: 30 })).toEqual([0.5, 1]);
+  expect(at({ width: 30, height: 10 })).toEqual([0.5, 1]);
+  expect(at({ width: 120, height: 12 })).toEqual([0.5, 1]);       // long but thin
+  // Under 10px on its long side the divisor is 3, not 2.
+  const [tinyArtist, tinyCartoonist] = at({ width: 8, height: 8 });
+  expect(tinyArtist).toBeCloseTo(1 / 3, 10);
+  expect(tinyCartoonist).toBeCloseTo(2 / 3, 10);
+  // The escapes: a rounded shape at 15px+, and a linear element at 50px+.
+  expect(at({ width: 40, height: 16, roundness: { type: 3 } })).toEqual([1, 2]);
+  expect(at({ width: 40, height: 14, roundness: { type: 3 } })).toEqual([0.5, 1]);
+  expect(at({ type: "line", width: 60, height: 4 })).toEqual([1, 2]);
+  expect(at({ type: "arrow", width: 40, height: 4 })).toEqual([0.5, 1]);
+  // Freedraw is *not* linear — upstream has the `|| freedraw` clause written
+  // out and commented off (typeChecks.ts:156).
+  expect(at({ type: "freedraw", width: 60, height: 4 })).toEqual([0.5, 1]);
+  // And the damping is capped, so a file with an out-of-range roughness can't
+  // produce an arbitrarily rough tiny shape.
+  expect(adjustedRoughness({ type: "rectangle", roughness: 40, width: 8, height: 8 })).toBe(2.5);
+});
+
+test("seed 0 becomes 1, or Rough re-rolls the shape on every repaint", () => {
+  // Rough's `this.seed ? … : Math.random()` means seed 0 is "no seed", and a
+  // shape that re-scrambles per frame is the one thing this renderer promises
+  // not to do. The core can't mint a 0, but a hand-authored file can.
+  expect(roughOptions(rect({ seed: 0 })).seed).toBe(1);
+  expect(roughOptions(rect({ seed: undefined })).seed).toBe(1);
+  expect(roughOptions(rect({ seed: 12345 })).seed).toBe(12345);
+});
+
+test("an ellipse pins curveFitting, so it stops shrinking as roughness rises", () => {
+  // Rough's default 0.95 is spent on `rx += randOffset(rx * (1 - curveFitting))`
+  // (shape.ts:237-239). Ellipses only — nothing else sets it.
+  expect(roughOptions(rect({ type: "ellipse" })).curveFitting).toBe(1);
+  expect(roughOptions(rect()).curveFitting).toBeUndefined();
+  expect(roughOptions(rect({ type: "line" })).curveFitting).toBeUndefined();
+});
+
+// --- dark mode --------------------------------------------------------------
+
+test("dark mode is off unless asked for, and then it is a per-colour transform", () => {
+  // Excalidraw's dark theme rewrites every element colour through
+  // invert(93%) hue-rotate(180deg) (colors.ts:62-122) rather than swapping
+  // palettes, so a dark-authored file holds the light colours and both themes
+  // are the same document.
+  expect(applyDarkModeFilter("#1e1e1e", false)).toBe("#1e1e1e");
+  // Grey stays grey: each row of the 180deg matrix sums to 1.
+  expect(applyDarkModeFilter("#1e1e1e", true)).toBe("#d3d3d3");
+  expect(applyDarkModeFilter("#ffffff", true)).toBe("#121212");
+  // And a hue survives as its light counterpart rather than as mud.
+  expect(applyDarkModeFilter("#e03131", true)).toBe("#ff8383");
+});
+
+test("dark mode keeps alpha, and leaves a colour it cannot read alone", () => {
+  expect(applyDarkModeFilter("#1e1e1e80", true)).toBe("#d3d3d380");
+  expect(applyDarkModeFilter("rgb(30, 30, 30)", true)).toBe("#d3d3d3");
+  expect(applyDarkModeFilter("rgba(30, 30, 30, 0.5)", true)).toBe("#d3d3d380");
+  // Wrong is worse than unfiltered: a CSS keyword or anything else this can't
+  // parse comes back untouched rather than guessed at.
+  expect(applyDarkModeFilter("transparent", true)).toBe("transparent");
+  expect(applyDarkModeFilter("rebeccapurple", true)).toBe("rebeccapurple");
+});
+
+test("the option mapping carries dark mode into stroke and fill", () => {
+  const o = roughOptions(rect({ backgroundColor: "#ffffff" }), { isDarkMode: true });
+  expect(o.stroke).toBe("#d3d3d3");
+  expect(o.fill).toBe("#121212");
+  const light = roughOptions(rect({ backgroundColor: "#ffffff" }));
+  expect(light.stroke).toBe("#1e1e1e");
+  expect(light.fill).toBe("#ffffff");
 });
 
 test("opacity converts from the file's 0-100 to canvas' 0-1", () => {
