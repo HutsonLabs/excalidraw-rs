@@ -66,6 +66,29 @@ export const callsOf = (ctx, name) => ctx.calls.filter((c) => c[0] === name);
 
 // --- a DOM, to the extent the tests need one ---------------------------------
 
+// --- the lazily-loaded modules, warmed before any test runs -------------------
+
+// `renderEditor` reaches its properties panel through `import()`, so the panel
+// mounts a turn or more after the view does. The tests wait that turn out with
+// a single `setTimeout(0)`, which is long enough for a module already in the
+// registry and *not* long enough for the first, cold load: on a loaded machine
+// the read and compile outrun the macrotask, and the panel's listeners land in
+// whichever test happens to be running when the import finally resolves. The
+// ledger below is cleared per test, so those adds are counted against a test
+// that never made them — and the view that did make them belongs to a test
+// that has already ended and will never dispose it.
+//
+// That is the whole of the intermittent `contract.test.js` failure: not a leak
+// in the view, but a cold import outrunning the barrier the tests use. It
+// showed as `BUTTON:click` 75 and `INPUT:input` 1 — a whole panel — appearing
+// in a test that mounts one view and disposes it.
+//
+// Importing it here, once, makes every later `import()` of the same specifier
+// a registry hit that settles in a microtask, and `setTimeout(0)` is always
+// after those. Top-level await, so no file that imports this harness can start
+// a test before the warm-up has finished.
+await import("../../src/excalidrawProps.js");
+
 /// Every add and remove of a listener, anywhere, as one net tally.
 ///
 /// A view that removed nine of its ten listeners fails against this, and so
