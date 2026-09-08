@@ -248,13 +248,15 @@ export function pointerIntent(state, ev, probe = {}) {
     // Clicking text that is already there types into it. Without this the text
     // tool stacks a second element on top of the first, which reads as "my
     // text got duplicated and now I cannot edit either copy".
-    //
-    // TODO(labels): a *shape* under the pointer should bind a label to it
-    // rather than drop a free text element over it, the way double-clicking
-    // one already does — `editLabel` in excalidrawEdit.js is the whole of it,
-    // and this is the one route that does not reach it.
     const hit = probe.hit ?? -1;
     if (hit >= 0 && probe.hitType === "text") return { kind: "editText", index: hit };
+    // A shape under the pointer gets a *label*, exactly as double-clicking it
+    // does. This was the one route into text that never reached `editLabel`:
+    // the same click that binds a label in Excalidraw laid a free-floating text
+    // element over the box here, which then stayed behind the moment the box
+    // was moved. `probe.label` is -1 for anything `bindLabel` would decline.
+    const label = probe.label ?? -1;
+    if (label >= 0) return { kind: "labelShape", index: label };
     return { kind: "text" };
   }
   if (tool.id === "eraser") return { kind: "erase" };

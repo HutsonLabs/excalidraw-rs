@@ -159,10 +159,20 @@ test("the text tool types into text that is already there", () => {
   // element with the text tool stacked a second one on top of it.
   const onText = { handle: -1, hit: 2, hitSelected: false, hitType: "text" };
   expect(pointerIntent(at("text"), down(), onText)).toEqual({ kind: "editText", index: 2 });
-  // A shape is not text, and empty canvas is not either.
-  const onRect = { handle: -1, hit: 2, hitSelected: false, hitType: "rectangle" };
-  expect(pointerIntent(at("text"), down(), onRect)).toEqual({ kind: "text" });
+  // Empty canvas is where new text comes from, and the only place.
   expect(pointerIntent(at("text"), down(), empty)).toEqual({ kind: "text" });
+});
+
+test("the text tool on a shape asks for that shape's label", () => {
+  // The same thing double-clicking the shape does. It used to return `text`
+  // here, which laid a free-floating element over the box — right up until the
+  // box moved and the words stayed behind.
+  const onRect = { handle: -1, hit: 2, hitSelected: false, hitType: "rectangle", label: 2 };
+  expect(pointerIntent(at("text"), down(), onRect)).toEqual({ kind: "labelShape", index: 2 });
+  // A shape the model would refuse to bind a label to — a line, an image, a
+  // frame — reports no label, and free text is the honest answer for it.
+  const onLine = { handle: -1, hit: 2, hitSelected: false, hitType: "line", label: -1 };
+  expect(pointerIntent(at("text"), down(), onLine)).toEqual({ kind: "text" });
 });
 
 test("a point handle beats the box handle sitting on top of it", () => {

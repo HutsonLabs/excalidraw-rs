@@ -543,6 +543,78 @@ test("the text tool clicked on text edits it instead of stacking another", async
   expect(textsOf()).toHaveLength(1);
 });
 
+test("a double-click retargeted by pointer capture still reaches the canvas", async () => {
+  // The bug the user reported, and the reason none of the tests above ever saw
+  // it: `onPointerDown` captures the pointer on the wrap so a drag that leaves
+  // the window keeps arriving, and a captured pointer's later events — and their
+  // compatibility mouse events — are retargeted to the capture element. So a
+  // real browser reports `pointerdown` on the canvas and `dblclick` on the wrap,
+  // and a handler that insisted on the canvas returned on its first line.
+  // Verified against Chromium: pointerdown -> CANVAS, dblclick -> DIV.xd-wrap.
+  const { wrap, dispose } = await mount({ text: sceneOf(shape({ id: "a", backgroundColor: "#ffc9c9" })) });
+  const canvas = wrap.children.find((c) => c.tagName === "CANVAS");
+  // Both targets a browser can deliver, and neither may be refused.
+  wrap.dispatch("dblclick", { clientX: 50 + PAD, clientY: 30 + PAD, target: canvas });
+  expect(overlayOf(wrap)).toBeDefined();
+  dispose();
+});
+
+test("a double-click from a piece of chrome is still not the canvas's", async () => {
+  // The other half of the same check: the tool island and the properties panel
+  // are children of the wrap, and an event that started in one must not reach
+  // the drawing behind it.
+  const { wrap, dispose } = await mount({ text: sceneOf(shape({ id: "a", backgroundColor: "#ffc9c9" })) });
+  const button = findNode(wrap, (n) => n.tagName === "BUTTON");
+  expect(button).toBeTruthy();
+  wrap.dispatch("dblclick", { clientX: 50 + PAD, clientY: 30 + PAD, target: button });
+  expect(overlayOf(wrap)).toBeUndefined();
+  dispose();
+});
+
+test("the text tool clicked on a shape labels it rather than laying text over it", async () => {
+  // The last route into text that never reached `editLabel`. It dropped a free
+  // element on top of the box, which looks right until the box is moved and the
+  // words stay behind.
+  const { wrap, dispose } = await mount({
+    text: sceneOf(shape({ id: "a", width: 200, height: 100, backgroundColor: "#ffc9c9" })),
+  });
+  type(wrap, "t");
+  press(wrap, 100, 50);
+  lift(wrap, 100, 50);
+  expect(overlayOf(wrap)).toBeDefined();
+  write(wrap, "label");
+  const [text] = textsOf();
+  expect(text.containerId).toBe("a");
+  expect(live.element(0).boundElements).toEqual([{ id: text.id, type: "text" }]);
+  dispose();
+});
+
+test("the text tool inside an unfilled shape labels it too", async () => {
+  // A transparent shape is stroke-only for hit-testing, so the interior misses.
+  // The double-click already fell back to the enclosing box; the tool asks the
+  // same question through the same helper, so it cannot answer differently.
+  const { wrap, dispose } = await mount({
+    text: sceneOf(shape({ id: "a", x: 0, y: 0, width: 200, height: 100 })),
+  });
+  type(wrap, "t");
+  press(wrap, 100, 50);
+  lift(wrap, 100, 50);
+  write(wrap, "label");
+  expect(textsOf()[0].containerId).toBe("a");
+  dispose();
+});
+
+test("the text tool on open canvas still makes free text", async () => {
+  const { wrap, dispose } = await mount({ text: sceneOf(shape({ id: "a" })) });
+  type(wrap, "t");
+  press(wrap, 400, 400);
+  lift(wrap, 400, 400);
+  write(wrap, "free");
+  const [text] = textsOf();
+  expect(text.containerId ?? null).toBe(null);
+  dispose();
+});
+
 test("Enter on a selected shape types into it", async () => {
   const { wrap } = await mount({ text: sceneOf(shape({ id: "a", backgroundColor: "#ffc9c9" })) });
   press(wrap, 50, 30);

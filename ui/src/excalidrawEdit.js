@@ -1133,6 +1133,18 @@ export function renderExcalidraw(host, text, {
       // selection is against how big a handle is, so that a tiny element at a
       // low zoom is not entirely covered by its own handles.
       hitType: (hit >= 0 ? doc.element(hit)?.type : "") ?? "",
+      // The shape a label would go on, or -1 — the text tool's version of the
+      // question `onDoubleClick` asks, so clicking a box with the text tool
+      // binds a label to it instead of dropping free text over it.
+      //
+      // A getter because this is the one field with a cost: `enclosingAt` walks
+      // the elements, and the probe is rebuilt on every pointermove to pick a
+      // cursor. Only `pointerIntent`'s text branch ever reads it, so only a
+      // press with the text tool live pays for it.
+      get label() {
+        const index = typeTargetAt(x, y);
+        return index >= 0 && LABELABLE.has(doc.element(index)?.type) ? index : -1;
+      },
       box: doc.selectionBounds(),
       handleRadius: radius,
     };
@@ -1309,7 +1321,18 @@ export function renderExcalidraw(host, text, {
   /// scrolling the properties panel zooms the drawing. Checking the target
   /// rather than calling `stopPropagation` in the islands keeps the rule in
   /// one place instead of in every module that ever floats over the canvas.
-  const onCanvas = (ev) => !ev?.target || ev.target === canvas;
+  ///
+  /// `wrap` counts as well as `canvas`, and that is not a loosening — it is
+  /// what pointer capture does. `onPointerDown` captures the pointer on `wrap`
+  /// (so a drag that leaves the window keeps arriving), and the spec then
+  /// retargets every later event of that pointer *and its compatibility mouse
+  /// events* to the capture element. A real browser therefore reports
+  /// `pointerdown` on the canvas and `pointerup`, `click` and `dblclick` on the
+  /// wrap — so a check for the canvas alone threw away every double-click the
+  /// user ever made, which is the whole of "I can't double-click a shape and
+  /// type into it". The chrome is still excluded: an island is a *descendant*
+  /// of `wrap`, so an event that started in one names the island, never this.
+  const onCanvas = (ev) => !ev?.target || ev.target === canvas || ev.target === wrap;
 
   const onPointerDown = (ev) => {
     if (detached || !doc || !onCanvas(ev)) return;
@@ -1377,6 +1400,17 @@ export function renderExcalidraw(host, text, {
       case "text":
         createText(x, y);
         gesture = null; // the overlay owns the keyboard now
+        break;
+      case "labelShape":
+        // The text tool on a shape: its label, the same one a double-click
+        // reaches, so the two gestures cannot produce two different things.
+        // The tool moves on first and the overlay opens second, the same order
+        // `createText` uses — whatever opens the overlay has to be last, because
+        // it takes the keyboard and nothing after it may take it back.
+        tools.tool = afterDraw(tools);
+        toolChanged();
+        editLabel(intent.index);
+        gesture = null;
         break;
       case "editText": {
         // The text tool clicked on text that is already there. Excalidraw types
@@ -1871,17 +1905,28 @@ export function renderExcalidraw(host, text, {
     return -1;
   };
 
+  /// What a "type here" gesture at a scene point means: the element actually
+  /// under the pointer, and failing that the shape whose *interior* it is
+  /// inside, or -1 for open canvas.
+  ///
+  /// Shared by the double-click and by the text tool, because they are the same
+  /// question asked with two different hands — and when they disagreed, the tool
+  /// was the one that got it wrong.
+  const typeTargetAt = (x, y) => {
+    const hit = hitAt(x, y);
+    return hit >= 0 ? hit : enclosingAt(x, y);
+  };
+
   const onDoubleClick = (ev) => {
     if (detached || !doc || !onCanvas(ev)) return;
     ev.preventDefault?.();
     const [x, y] = scenePoint(ev);
-    const hit = hitAt(x, y);
     // Three branches, and it used to have two: text, then a *miss*. A filled
     // rectangle fell between them — the hit succeeded and it was not text — so
     // double-clicking one did nothing at all, no overlay and no feedback
     // (docs/audit/audit-text.md, verdict). An unfilled one fell out the other
     // side of the same gap and got a stray text element instead of a label.
-    const target = hit >= 0 ? hit : enclosingAt(x, y);
+    const target = typeTargetAt(x, y);
     const element = target >= 0 ? doc.element(target) : null;
     if (element?.type === "text") {
       doc.setSelection([target]);

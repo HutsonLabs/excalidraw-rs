@@ -162,9 +162,19 @@ export class FakeNode {
   /// handler calls on it. Does not bubble: nothing under test relies on it,
   /// and a fake that bubbled would have to model capture and stopPropagation
   /// too.
+  /// Dispatch an event at this node.
+  ///
+  /// `target` defaults to the node dispatched on, because that is what a
+  /// browser does and a fake that left it undefined was *easier to satisfy
+  /// than the real thing* — the rule this file is written around. The editor
+  /// ignores events that came from the chrome by checking `ev.target`, so an
+  /// event with no target at all sailed through a check that a real one failed:
+  /// every double-click test passed against a handler that, in a browser,
+  /// returned on its first line. A test that means "this came from a tool
+  /// button" still says so by passing `target` itself.
   dispatch(type, ev = {}) {
     const list = [...(this.handlers.get(type) ?? [])];
-    const event = { type, preventDefault() {}, stopPropagation() {}, ...ev };
+    const event = { type, target: this, preventDefault() {}, stopPropagation() {}, ...ev };
     for (const fn of list) fn(event);
     return event;
   }
