@@ -52,7 +52,13 @@ fn xd_read_file(path: String) -> Result<String, String> {
 /// filesystem is atomic, so a reader either sees the old file or the new one.
 #[tauri::command]
 fn xd_write_file(path: String, contents: String) -> Result<(), String> {
-    let path = PathBuf::from(path);
+    write_atomically(&PathBuf::from(path), contents.as_bytes())
+}
+
+/// The temporary-file-then-rename dance, shared by the text and bytes commands
+/// so there is one place where saving is made durable rather than two that can
+/// drift apart.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
         ".{}.tmp",
@@ -60,16 +66,27 @@ fn xd_write_file(path: String, contents: String) -> Result<(), String> {
     ));
     let write = || -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
+        f.write_all(bytes)?;
         // fsync before the rename: the rename being durable is worth nothing
         // if the bytes it points at are still in a buffer.
         f.sync_all()?;
-        fs::rename(&tmp, &path)
+        fs::rename(&tmp, path)
     };
     write().map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("Couldn't save {}: {e}", show(&path))
+        format!("Couldn't save {}: {e}", show(path))
     })
+}
+
+/// Write bytes atomically. The same discipline as `xd_write_file`, and it
+/// exists as a second command rather than a flag on the first because the
+/// difference is the payload type, not the behaviour: a PNG through a `String`
+/// would be mangled at every byte that is not valid UTF-8, which is most of
+/// them. Tauri hands `Vec<u8>` across the boundary without transcoding, so an
+/// export arrives here as the bytes the canvas produced.
+#[tauri::command]
+fn xd_write_bytes(path: String, contents: Vec<u8>) -> Result<(), String> {
+    write_atomically(&PathBuf::from(path), &contents)
 }
 
 /// The document this launch was asked to open, if any — taken, not read, so a
@@ -105,6 +122,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             xd_read_file,
             xd_write_file,
+            xd_write_bytes,
             xd_startup_path
         ])
         .on_window_event(|_window, _event| {})

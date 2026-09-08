@@ -25,7 +25,7 @@
 // That is the intended state until Phase 6 lands the capability, not a stub
 // someone forgot to finish.
 
-import { chooseSavePath, writeFile, isApp } from "./files.js";
+import { chooseSavePath, writeFile, writeBytes, isApp } from "./files.js";
 
 /// Swap `.excalidraw` for the export's own extension, so "diagram.excalidraw"
 /// suggests "diagram.png" rather than "diagram.excalidraw.png".
@@ -74,15 +74,11 @@ export async function exportSvg({ getView, docPath, report }) {
 
 /// Export the mounted view to PNG.
 ///
-/// Blocked on a second thing, and it is worth being explicit about which:
-/// `xd_write_file` takes a `String`, and a PNG is bytes. Writing them through
-/// a text command would corrupt every non-UTF-8 byte in the file, which is
-/// most of them. So this path needs a bytes-capable command on the Rust side
-/// — `xd_write_bytes(path, contents: Vec<u8>)` is the obvious shape — and
-/// until that exists there is nothing to wire the dialog to.
-///
-/// Reported rather than silently missing: an export menu entry that does
-/// nothing is worse than one that says why.
+/// The bytes half is `view.exportPNG()`, which returns a `Uint8Array`; the
+/// durable-write half is `xd_write_bytes`, which exists precisely because
+/// routing a PNG through `xd_write_file`'s `String` would corrupt every byte
+/// that is not valid UTF-8. The split is the same one this module's header
+/// describes: the view renders, the shell chooses where and writes.
 export async function exportPng({ getView, docPath, report }) {
   const view = getView?.();
   if (typeof view?.exportPNG !== "function") {
@@ -100,11 +96,16 @@ export async function exportPng({ getView, docPath, report }) {
     report?.(`Couldn't render the PNG: ${e?.message ?? e}`);
     return;
   }
+  // Asked *after* the render succeeds, for the same reason as SVG: a dialog
+  // that opens and then reports a failure has wasted a decision already made.
   const path = await chooseSavePath(suggestName(docPath, "png"));
-  if (!path) return;
-  void bytes;
-  void path;
-  report?.("PNG export needs a bytes-capable write command (xd_write_bytes).");
+  if (!path) return; // cancelled, which is not a failure
+  try {
+    await writeBytes(path, bytes);
+    report?.("");
+  } catch (e) {
+    report?.(`Couldn't write the PNG: ${e?.message ?? e}`);
+  }
 }
 
 /// The export entries for the app's menu, in `viewActions.js`'s descriptor

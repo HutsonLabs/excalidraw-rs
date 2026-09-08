@@ -64,6 +64,19 @@ export function writeFile(path, contents) {
   return invoke("xd_write_file", { path, contents });
 }
 
+/// Write bytes to a file — the export path, not the save path.
+///
+/// A separate command from `writeFile` for the reason `export.js` documents at
+/// length: a PNG routed through a `String` is corrupted at every byte that is
+/// not valid UTF-8. `Uint8Array` is normalised to a plain array because that is
+/// what Tauri's IPC serialises into a Rust `Vec<u8>`.
+export function writeBytes(path, contents) {
+  return invoke("xd_write_bytes", {
+    path,
+    contents: Array.from(contents instanceof Uint8Array ? contents : new Uint8Array(contents)),
+  });
+}
+
 /// The file the app was launched with — a double-clicked document, or a path
 /// on the command line. Null when it was launched on its own.
 export async function startupPath() {
