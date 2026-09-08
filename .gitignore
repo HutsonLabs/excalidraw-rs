@@ -3,3 +3,4 @@
 /src-tauri/gen/schemas
 node_modules
 .DS_Store
+scratchpad.md
