@@ -28,6 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The freshness check below reads history to compare the vendored
+          # artifact against its sources, and the default single-commit clone
+          # would let it answer "nothing changed" to everything.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -39,7 +44,10 @@ jobs:
       - run: scripts/build-wasm.sh
       # A vendored artifact that drifts from its source is worse than none:
       # ui/ is served straight off disk, so what is committed is what ships.
-      - run: git diff --exit-code -- ui/vendor/xd-wasm || (echo "ui/vendor/xd-wasm is stale — run scripts/build-wasm.sh and commit it" && exit 1)
+      # Asked of history rather than of the bytes — a release WASM build is not
+      # byte-reproducible across toolchains, and the diff this replaces failed
+      # on artifacts that were perfectly current. See the script's header.
+      - run: scripts/check-wasm-fresh.sh
 
   js:
     runs-on: ubuntu-latest
