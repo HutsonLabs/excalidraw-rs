@@ -114,9 +114,11 @@
 
 .xdp-group { display: flex; flex-direction: column; gap: 0.25rem; }
 
-/* The fill group is absent, not merely invisible, when the background is
-   transparent — and `hidden` on a flex child needs saying, because
-   `display: flex` above wins over the UA's `[hidden] { display: none }`. */
+/* A group that does not apply to what is selected is absent, not merely
+   invisible — and `hidden` on a flex child needs saying, because `display: flex`
+   above wins over the UA's `[hidden] { display: none }`. Fill was the first of
+   these (transparent background, nothing to fill); now every row is gated on
+   whether the selected element types have the field at all. */
 .xdp-group[hidden] { display: none; }
 
 .xdp-label {
@@ -170,6 +172,20 @@
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--fg, var(--text));
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* The verb rows (layers, align, flip, grouping) hold buttons that need more
+   than one element selected. Dimmed rather than removed: the row keeping its
+   shape is how the user learns the button exists and what it wants, where a row
+   that grew a button on the second click would just be a surprise. */
+.xdp-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.xdp-btn:disabled:hover {
+  background: transparent;
+  color: var(--subtext);
 }
 
 /* --- Swatches --------------------------------------------------------------- */

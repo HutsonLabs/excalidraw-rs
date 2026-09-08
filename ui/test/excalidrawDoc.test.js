@@ -10,9 +10,10 @@
 
 import { test, expect } from "bun:test";
 import {
-  clipboardText, drawingSource, isEmptyDrawing, mergeStyle, openMessage,
-  parseClipboard, stylePatch, styleFor, styleFrom, textBox, worthSaving,
-  CLIPBOARD_TYPE, DEFAULT_STYLE, STYLE_KEYS,
+  clipboardText, drawingSource, fileStyle, isEmptyDrawing, isRoundable, mergeStyle,
+  openMessage, parseClipboard, roundnessFor, strokeWidthKeyOf, strokeWidthPx, stylePatch,
+  styleFor, styleFrom, textBox, worthSaving,
+  CLIPBOARD_TYPE, DEFAULT_STYLE, ROUNDNESS, STYLE_KEYS,
 } from "../src/excalidrawDoc.js";
 
 const scene = (elements = []) =>
@@ -133,6 +134,120 @@ test("a shape is only given the keys its kind has", () => {
   expect(text).not.toHaveProperty("roundness");
 });
 
+test("each kind gets the roundness type Excalidraw writes for it", () => {
+  // `ADAPTIVE_RADIUS` (3) is a 32px cap and belongs to rectangles and images;
+  // `PROPORTIONAL_RADIUS` (2) is a quarter of the short side and belongs to
+  // diamonds, lines and arrows (`typeChecks.ts:309-316`). Everything used to get
+  // 3, so a diamond authored here re-rendered at excalidraw.com with a flat 32px
+  // corner instead of a proportional one.
+  const round = { roundness: { type: 3 } };
+  expect(styleFor("rectangle", round).roundness).toEqual({ type: ROUNDNESS.ADAPTIVE });
+  expect(styleFor("diamond", round).roundness).toEqual({ type: ROUNDNESS.PROPORTIONAL });
+  expect(styleFor("line", round).roundness).toEqual({ type: ROUNDNESS.PROPORTIONAL });
+  expect(styleFor("arrow", round).roundness).toEqual({ type: ROUNDNESS.PROPORTIONAL });
+  // And sharp is still sharp, for every one of them.
+  expect(styleFor("diamond", { roundness: null }).roundness).toBe(null);
+  expect(styleFor("arrow", { roundness: null }).roundness).toBe(null);
+});
+
+test("new lines and arrows carry a roundness at all, so a curve can exist", () => {
+  // The renderer reads `roundness` to choose a curve over a polyline, and nothing
+  // ever wrote it for a linear element — so a curved line was unreachable, and a
+  // line authored here reopened in Excalidraw as straight segments.
+  expect(isRoundable("line")).toBe(true);
+  expect(isRoundable("arrow")).toBe(true);
+  expect(styleFor("line", DEFAULT_STYLE)).toHaveProperty("roundness");
+  expect(styleFor("arrow", DEFAULT_STYLE).roundness).toEqual({ type: 2 });
+  // Kinds with no corners still get nothing rather than null noise.
+  expect(isRoundable("ellipse")).toBe(false);
+  expect(isRoundable("freedraw")).toBe(false);
+  expect(styleFor("ellipse", DEFAULT_STYLE)).not.toHaveProperty("roundness");
+});
+
+test("a descriptor already naming the right type keeps whatever else it carries", () => {
+  const carried = { type: 2, value: 12 };
+  expect(roundnessFor("diamond", carried)).toBe(carried);
+  // The wrong type is replaced rather than corrected in place.
+  expect(roundnessFor("diamond", { type: 3, value: 12 })).toEqual({ type: 2 });
+  expect(roundnessFor("freedraw", carried)).toBe(null);
+});
+
+test("a patch's roundness type is settled against what it will land on", () => {
+  // The panel emits one descriptor for the whole selection and cannot know the
+  // type belongs to the kind.
+  expect(stylePatch({ roundness: { type: 3 } }, ["diamond"]).roundness).toEqual({ type: 2 });
+  expect(stylePatch({ roundness: { type: 3 } }, ["rectangle"]).roundness).toEqual({ type: 3 });
+  // A mixed selection cannot have it both ways from one patch, so what the panel
+  // asked for stands rather than half the selection being quietly wrong.
+  expect(stylePatch({ roundness: { type: 3 } }, ["rectangle", "diamond"]).roundness)
+    .toEqual({ type: 3 });
+  // And with nothing to go on, nothing changes.
+  expect(stylePatch({ roundness: null }, ["diamond"]).roundness).toBe(null);
+});
+
+test("a stroke width is remembered as a key, so it means the same on every kind", () => {
+  // Excalidraw's buttons carry thin/medium/bold and `getStrokeWidthByKey` halves
+  // them for freedraw, because a pencil stroke is drawn at `strokeWidth * 4.25`.
+  expect(strokeWidthPx("bold", "rectangle")).toBe(4);
+  expect(strokeWidthPx("bold", "freedraw")).toBe(2);
+  // 2 is "medium" for a shape and "bold" for a pencil stroke, which is exactly
+  // why the px alone cannot be remembered.
+  expect(strokeWidthKeyOf(2, ["rectangle"])).toBe("medium");
+  expect(strokeWidthKeyOf(2, ["freedraw"])).toBe("bold");
+  // One patch reaches a whole selection, so a mixed one reads as the shape table.
+  expect(strokeWidthKeyOf(2, ["freedraw", "rectangle"])).toBe("medium");
+  // A width no button can express is left alone rather than rounded to one.
+  expect(strokeWidthKeyOf(3, ["rectangle"])).toBeUndefined();
+});
+
+test("extra bold on a pencil stroke is extra bold on the next rectangle", () => {
+  // The bug this fixes: the panel resolves the key to px against the *current*
+  // selection, so picking the widest option on a freedraw emitted 2 — and 2 read
+  // back as "Bold" on the rectangle drawn next.
+  const remembered = mergeStyle(DEFAULT_STYLE, { strokeWidth: 2 }, ["freedraw"]);
+  expect(remembered.strokeWidthKey).toBe("bold");
+  expect(styleFor("freedraw", remembered).strokeWidth).toBe(2);
+  expect(styleFor("rectangle", remembered).strokeWidth).toBe(4);
+  // The key is the editor's memory, not a field: it must never reach an element.
+  expect(STYLE_KEYS).not.toContain("strokeWidthKey");
+  expect(stylePatch(remembered)).not.toHaveProperty("strokeWidthKey");
+  expect(fileStyle(remembered)).not.toHaveProperty("strokeWidthKey");
+  expect(Object.keys(fileStyle(remembered)).sort()).toEqual([...STYLE_KEYS].sort());
+});
+
+test("a width in neither table is carried as it is, and forgets the key", () => {
+  const odd = mergeStyle(mergeStyle(DEFAULT_STYLE, { strokeWidth: 2 }, ["freedraw"]), { strokeWidth: 3 }, ["rectangle"]);
+  expect(odd.strokeWidthKey).toBeUndefined();
+  expect(styleFor("rectangle", odd).strokeWidth).toBe(3);
+});
+
+test("the alignment and arrowhead keys reach the document", () => {
+  // Four panel rows were landing patches that `stylePatch` filtered out — the
+  // exact trap the text audit warned about: a control that looks live and is not.
+  for (const key of ["textAlign", "verticalAlign", "startArrowhead", "endArrowhead"]) {
+    expect(STYLE_KEYS).toContain(key);
+  }
+  expect(stylePatch({ textAlign: "center" })).toEqual({ textAlign: "center" });
+  expect(stylePatch({ endArrowhead: null })).toEqual({ endArrowhead: null });
+});
+
+test("alignment lands on text and arrowheads on arrows, and not the other way", () => {
+  const text = styleFor("text", DEFAULT_STYLE);
+  expect(text.textAlign).toBe("left");
+  expect(text.verticalAlign).toBe("top");
+  expect(text).not.toHaveProperty("endArrowhead");
+
+  const arrow = styleFor("arrow", DEFAULT_STYLE);
+  expect(arrow.startArrowhead).toBe(null);
+  expect(arrow.endArrowhead).toBe("arrow");
+  expect(arrow).not.toHaveProperty("textAlign");
+
+  // A plain line does not inherit the head the last arrow was drawn with —
+  // Excalidraw's `newLinearElement` writes arrowheads for an arrow only.
+  expect(styleFor("line", DEFAULT_STYLE)).not.toHaveProperty("endArrowhead");
+  expect(styleFor("rectangle", DEFAULT_STYLE)).not.toHaveProperty("textAlign");
+});
+
 test("the style read off an element falls back rather than showing holes", () => {
   const s = styleFrom({ type: "rectangle", strokeColor: "#e03131" });
   expect(s.strokeColor).toBe("#e03131");
@@ -183,6 +298,70 @@ test("a payload round-trips through the clipboard", () => {
   expect(parsed.elements).toHaveLength(2);
   expect(parsed.elements[0].x).toBe(1);
   expect(parsed.elements[1].type).toBe("ellipse");
+});
+
+test("a container id and a frame id do not travel either", () => {
+  // Both are references into the document they were copied from. A pasted label
+  // claiming a `containerId` that names a foreign element, or a shape claiming
+  // membership of a frame the target has never heard of, is a dangling
+  // reference in a saved file — the failure that does not announce itself.
+  const payload = JSON.parse(clipboardText([{
+    type: "text", id: "t", containerId: "r", frameId: "f", text: "hi", x: 0, y: 0,
+  }]));
+  expect(payload.elements[0]).not.toHaveProperty("containerId");
+  expect(payload.elements[0]).not.toHaveProperty("frameId");
+  // And they are stripped on the way *in* as well, because a payload written by
+  // Excalidraw carries them and this side is the one that has to be safe.
+  const parsed = parseClipboard(JSON.stringify({
+    type: CLIPBOARD_TYPE,
+    elements: [{ type: "text", containerId: "r", frameId: "f", text: "hi", x: 0, y: 0 }],
+  }));
+  expect(parsed.elements[0]).not.toHaveProperty("containerId");
+  expect(parsed.elements[0]).not.toHaveProperty("frameId");
+});
+
+test("a pasted group is grouped with itself, not with the original", () => {
+  // Carried through unchanged — which is what used to happen — the copies join
+  // the *original's* group, so moving the original drags the copy across the
+  // canvas. Dropped entirely, the grouping is simply lost. Excalidraw re-mints.
+  const elements = [
+    { type: "rectangle", x: 0, y: 0, groupIds: ["g1"] },
+    { type: "ellipse", x: 9, y: 9, groupIds: ["g1"] },
+    { type: "diamond", x: 4, y: 4, groupIds: ["g2", "g1"] },
+  ];
+  const parsed = parseClipboard(clipboardText(elements));
+  const [a, b, c] = parsed.elements;
+  // Nothing points at what it was copied from…
+  expect(a.groupIds).not.toContain("g1");
+  expect(c.groupIds).not.toContain("g2");
+  // …the two that shared a group still share one…
+  expect(a.groupIds[0]).toBe(b.groupIds[0]);
+  // …and the nesting is intact, innermost first, with a distinct inner id.
+  expect(c.groupIds).toHaveLength(2);
+  expect(c.groupIds[1]).toBe(a.groupIds[0]);
+  expect(c.groupIds[0]).not.toBe(c.groupIds[1]);
+});
+
+test("a copied image carries its bytes, and only its own", () => {
+  // `files` was hard-coded to {}, so the copied element kept its `fileId` and
+  // the bytes stayed behind: pasting into another document — the whole point of
+  // using Excalidraw's own clipboard marker — gave a permanent grey placeholder.
+  const files = {
+    wanted: { mimeType: "image/png", dataURL: "data:image/png;base64,AAA" },
+    unrelated: { mimeType: "image/png", dataURL: "data:image/png;base64,BBB" },
+  };
+  const payload = JSON.parse(clipboardText([{ type: "image", fileId: "wanted", x: 0, y: 0 }], files));
+  expect(payload.files.wanted.dataURL).toBe("data:image/png;base64,AAA");
+  // Copying one rectangle must not put every image in the drawing on the
+  // clipboard.
+  expect(payload.files).not.toHaveProperty("unrelated");
+  expect(parseClipboard(JSON.stringify(payload)).files.wanted).toBeDefined();
+});
+
+test("a drawing with no file map still copies", () => {
+  const payload = JSON.parse(clipboardText([{ type: "rectangle", x: 0, y: 0 }]));
+  expect(payload.files).toEqual({});
+  expect(parseClipboard(JSON.stringify(payload)).files).toEqual({});
 });
 
 test("a payload from a newer Excalidraw keeps its unknown fields", () => {

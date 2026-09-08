@@ -29,9 +29,12 @@
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import {
-  renderProps, STROKE_COLORS, BACKGROUND_COLORS, FILL_STYLES, STROKE_WIDTHS,
-  STROKE_STYLES, SLOPPINESS, EDGES, FONT_SIZES, FONT_FAMILIES, DEFAULT_STYLE,
-  TRANSPARENT, isTransparent, showsFill, edgeKey, roundnessFor, panelShown,
+  renderProps, STROKE_COLORS, BACKGROUND_COLORS, CANVAS_COLORS, FILL_STYLES,
+  STROKE_WIDTHS, STROKE_STYLES, SLOPPINESS, EDGES, FONT_SIZES, FONT_FAMILIES,
+  TEXT_ALIGNS, VERTICAL_ALIGNS, ARROWHEADS, DEFAULT_STYLE,
+  TRANSPARENT, MIXED, isTransparent, showsFill, edgeKey, edgeRoundness, panelShown,
+  foldStyles, sectionsFor, freehandOnly, strokeWidthFor, strokeWidthKey,
+  arrowheadFor, arrowheadKey,
 } from "../src/excalidrawProps.js";
 
 // --- The values Excalidraw actually writes -----------------------------------
@@ -53,23 +56,200 @@ test("the enumerations match Excalidraw's own value sets", () => {
   // Not 1/2/3: 5 is Excalifont, and the ids are not ours to renumber.
   expect(FONT_FAMILIES.map((o) => o.value)).toEqual([5, 2, 3]);
   expect(EDGES.map((o) => o.value)).toEqual(["sharp", "round"]);
+  expect(TEXT_ALIGNS.map((o) => o.value)).toEqual(["left", "center", "right"]);
+  expect(VERTICAL_ALIGNS.map((o) => o.value)).toEqual(["top", "middle", "bottom"]);
+  // Excalidraw's canvas picks, which are not element colours and not in either
+  // element palette.
+  expect(CANVAS_COLORS).toEqual(["#ffffff", "#f8f9fa", "#f5faff", "#fffce8", "#fdf8f6"]);
 });
 
-test("round edges are ADAPTIVE_RADIUS, and sharp ones are null rather than absent", () => {
-  expect(roundnessFor("round")).toEqual({ type: 3 });
-  expect(roundnessFor("sharp")).toBe(null);
+test("the arrowhead kinds are the ones the renderer can actually draw", () => {
+  // Excalidraw offers 13. Offering one we cannot paint would be a control that
+  // does nothing here and something else at excalidraw.com.
+  expect(ARROWHEADS.map((o) => o.value))
+    .toEqual(["none", "arrow", "bar", "dot", "triangle", "diamond"]);
+});
+
+test("an arrowhead writes null for none, and reads Excalidraw's two spellings", () => {
+  expect(arrowheadFor("none")).toBe(null);
+  expect(arrowheadFor("triangle")).toBe("triangle");
+  // Absent means different things at the two ends: the renderer draws an arrow
+  // for a missing endArrowhead and nothing for a missing startArrowhead.
+  expect(arrowheadKey(undefined, true)).toBe("arrow");
+  expect(arrowheadKey(null, true)).toBe("arrow");
+  expect(arrowheadKey(undefined, false)).toBe("none");
+  // `circle` is Excalidraw's newer name for the head we write as `dot`.
+  expect(arrowheadKey("circle", true)).toBe("dot");
+  expect(arrowheadKey(MIXED, true)).toBe(MIXED);
+});
+
+test("a stroke-width key resolves to half as much on a freedraw", () => {
+  // The schema-2.0 back-compat halving (`FREEDRAW_STROKE_WIDTH`). Skipping it
+  // drew every pencil stroke twice as thick as Excalidraw's.
+  expect(STROKE_WIDTHS.map((o) => o.key)).toEqual(["thin", "medium", "bold"]);
+  expect(["thin", "medium", "bold"].map((k) => strokeWidthFor(k, false))).toEqual([1, 2, 4]);
+  expect(["thin", "medium", "bold"].map((k) => strokeWidthFor(k, true))).toEqual([0.5, 1, 2]);
+
+  // And back: a freedraw imported from Excalidraw at 0.5/1/2 has to light a
+  // button up, where before it matched none of 1/2/4.
+  expect(strokeWidthKey(1, true)).toBe("medium");
+  expect(strokeWidthKey(0.5, true)).toBe("thin");
+  expect(strokeWidthKey(1, false)).toBe("thin");
+  // Even without knowing it is a freedraw, 0.5 is recognisable — the other
+  // table is the fallback rather than nothing pressed.
+  expect(strokeWidthKey(0.5, false)).toBe("thin");
+  expect(strokeWidthKey(MIXED, false)).toBeUndefined();
+  expect(strokeWidthKey(3, false)).toBeUndefined();
+});
+
+test("the freedraw table applies only when everything selected is a freedraw", () => {
+  // One patch reaches the whole selection, so a mixed pencil-and-box selection
+  // cannot have it both ways.
+  expect(freehandOnly({ kinds: ["freedraw"] })).toBe(true);
+  expect(freehandOnly({ kinds: ["freedraw", "freedraw"] })).toBe(true);
+  expect(freehandOnly({ kinds: ["freedraw", "rectangle"] })).toBe(false);
+  expect(freehandOnly({ kinds: [], tool: "freedraw" })).toBe(true);
+  expect(freehandOnly({ kinds: [], tool: "rectangle" })).toBe(false);
+  expect(freehandOnly({})).toBe(false);
+});
+
+test("the edges row answers round or sharp, and leaves the type to the doc layer", () => {
+  // Not named roundnessFor: excalidrawDoc.js owns that name and maps a *kind* to
+  // its roundness type (rectangle 3, diamond and line 2). This panel cannot —
+  // one click reaches a whole selection — so it emits the answer and `stylePatch`
+  // re-types it against the actual targets. The 3 is the placeholder that
+  // survives the one case stylePatch leaves alone: kinds wanting different types.
+  expect(edgeRoundness("round")).toEqual({ type: 3 });
+  expect(edgeRoundness("sharp")).toBe(null);
   expect(edgeKey(null)).toBe("sharp");
   expect(edgeKey(undefined)).toBe("sharp");
   expect(edgeKey({ type: 3 })).toBe("round");
 });
 
 test("a missing key renders a default rather than a blank row", () => {
-  // The panel is handed the style of whatever is selected, and a mixed
-  // selection or a file from an older schema will have holes in it.
+  // The panel is handed the style of whatever is selected, and a file from an
+  // older schema will have holes in it.
   expect(DEFAULT_STYLE.strokeColor).toBe("#1e1e1e");
   expect(DEFAULT_STYLE.backgroundColor).toBe(TRANSPARENT);
   expect(DEFAULT_STYLE.roundness).toBe(null);
   expect(DEFAULT_STYLE.opacity).toBe(100);
+  // Excalidraw's DEFAULT_ELEMENT_PROPS, and the same numbers excalidrawDoc.js's
+  // DEFAULT_STYLE and xd-core's new_element use. The two tables disagreed on
+  // these two, and a fallback that disagrees with the real default is a trap.
+  expect(DEFAULT_STYLE.strokeWidth).toBe(2);
+  expect(DEFAULT_STYLE.fillStyle).toBe("solid");
+  // An absent endArrowhead is drawn as an arrow, so that is what the row shows.
+  expect(DEFAULT_STYLE.endArrowhead).toBe("arrow");
+  expect(DEFAULT_STYLE.startArrowhead).toBe(null);
+  expect(DEFAULT_STYLE.textAlign).toBe("left");
+  expect(DEFAULT_STYLE.verticalAlign).toBe("top");
+});
+
+// --- The mixed multi-selection fold ------------------------------------------
+
+test("styles that disagree fold to MIXED, and ones that agree do not", () => {
+  const red = { strokeColor: "#e03131", strokeWidth: 2, opacity: 100 };
+  const blue = { strokeColor: "#1971c2", strokeWidth: 2, opacity: 100 };
+  const folded = foldStyles([red, blue]);
+  expect(folded.strokeColor).toBe(MIXED);
+  expect(folded.strokeWidth).toBe(2);
+  expect(folded.opacity).toBe(100);
+
+  // One element is not a disagreement with itself.
+  expect(foldStyles([red])).toEqual(red);
+  expect(foldStyles([])).toEqual({});
+  expect(foldStyles(null)).toEqual({});
+});
+
+test("the fold compares roundness by value, and treats absent as null", () => {
+  // roundness is the one field that is an object, so identity is not enough.
+  expect(foldStyles([{ roundness: { type: 3 } }, { roundness: { type: 3 } }]).roundness)
+    .toEqual({ type: 3 });
+  expect(foldStyles([{ roundness: { type: 3 } }, { roundness: null }]).roundness).toBe(MIXED);
+  // Absent and explicitly-null both mean "not set" for every field here.
+  expect(foldStyles([{ roundness: null }, {}]).roundness).toBe(null);
+});
+
+test("a key only some elements carry is a disagreement, not a value", () => {
+  // A text element with fontSize 28 and a rectangle with none do not share a
+  // font size, and pressing 28 would claim they did.
+  expect(foldStyles([{ fontSize: 28 }, { strokeColor: "#e03131" }]).fontSize).toBe(MIXED);
+  expect(foldStyles([{ strokeColor: "#e03131" }, { fontSize: 28 }]).fontSize).toBe(MIXED);
+});
+
+test("edgeKey passes a disagreement through rather than calling it sharp", () => {
+  // MIXED is truthy, so without this the Edges row would show "Round" pressed
+  // for a selection that does not agree about its corners.
+  expect(edgeKey(MIXED)).toBe(MIXED);
+});
+
+// --- Which sections apply ----------------------------------------------------
+
+test("a text element gets no background, fill, stroke style, sloppiness or edges", () => {
+  const on = sectionsFor({ kinds: ["text"] });
+  expect(on.background).toBe(false);
+  expect(on.fill).toBe(false);
+  expect(on.strokeStyle).toBe(false);
+  expect(on.sloppiness).toBe(false);
+  expect(on.edges).toBe(false);
+  expect(on.strokeWidth).toBe(false);
+  // What it does get: its colour, its opacity, and the four text rows.
+  expect(on.stroke).toBe(true);
+  expect(on.opacity).toBe(true);
+  expect(on.text).toBe(true);
+});
+
+test("edges are offered only on the shapes that can round", () => {
+  // canChangeRoundness: rectangle, diamond, line, image, iframe, embeddable.
+  // Notably not ellipse — a circle has no corners.
+  for (const kind of ["rectangle", "diamond", "line", "image"]) {
+    expect(sectionsFor({ kinds: [kind] }).edges).toBe(true);
+  }
+  for (const kind of ["ellipse", "arrow", "freedraw", "text"]) {
+    expect(sectionsFor({ kinds: [kind] }).edges).toBe(false);
+  }
+});
+
+test("sloppiness is offered only where there is a sketched outline", () => {
+  // hasStrokeStyle. A freedraw is a captured path, not a sketched one.
+  expect(sectionsFor({ kinds: ["rectangle"] }).sloppiness).toBe(true);
+  expect(sectionsFor({ kinds: ["arrow"] }).sloppiness).toBe(true);
+  expect(sectionsFor({ kinds: ["freedraw"] }).sloppiness).toBe(false);
+  expect(sectionsFor({ kinds: ["image"] }).sloppiness).toBe(false);
+});
+
+test("arrowheads are offered on arrows and nothing else", () => {
+  expect(sectionsFor({ kinds: ["arrow"] }).arrowheads).toBe(true);
+  // A line with an arrowhead is an arrow — canHaveArrowheads is arrow-only.
+  expect(sectionsFor({ kinds: ["line"] }).arrowheads).toBe(false);
+  expect(sectionsFor({ kinds: ["rectangle"] }).arrowheads).toBe(false);
+});
+
+test("an image has no stroke colour of its own", () => {
+  expect(sectionsFor({ kinds: ["image"] }).stroke).toBe(false);
+  expect(sectionsFor({ kinds: ["frame"] }).stroke).toBe(false);
+  expect(sectionsFor({ kinds: ["rectangle"] }).stroke).toBe(true);
+});
+
+test("a section applies if any selected element has it", () => {
+  // `some`, not `every`: the fill row still applies to the rectangle, and hiding
+  // it would take away the only way to reach it.
+  const on = sectionsFor({ kinds: ["rectangle", "text"] });
+  expect(on.fill).toBe(true);
+  expect(on.text).toBe(true);
+  expect(on.edges).toBe(true);
+});
+
+test("with nothing selected the active tool decides, and an unknown one shows all", () => {
+  expect(sectionsFor({ kinds: [], tool: "text" }).edges).toBe(false);
+  expect(sectionsFor({ kinds: [], tool: "text" }).text).toBe(true);
+  expect(sectionsFor({ kinds: [], tool: "ellipse" }).edges).toBe(false);
+  expect(sectionsFor({ kinds: [], tool: "rectangle" }).edges).toBe(true);
+  // Neither reported, or a tool that draws nothing: show everything, the same
+  // safe direction panelShown takes.
+  expect(sectionsFor({})).toEqual(sectionsFor({ kinds: [], tool: "selection" }));
+  expect(sectionsFor({}).sloppiness).toBe(true);
+  expect(sectionsFor({ kinds: [], tool: "hand" }).text).toBe(true);
 });
 
 // --- The visibility rules ----------------------------------------------------
@@ -117,6 +297,7 @@ class FakeEl {
     this.textContent = "";
     this.innerHTML = "";
     this.hidden = false;
+    this.disabled = false;
     this.id = "";
     this.title = "";
     this.type = "";
@@ -236,27 +417,67 @@ afterEach(() => {
 
 /// A panel over a mutable style, which is what every DOM test below wants:
 /// somewhere to see the patches land, and something for refresh() to re-read.
-function mount(initial = {}, { selection = true, tool = "rectangle" } = {}) {
+///
+/// `styles` (plural) mounts the panel over a *list* of styles, which is the
+/// contract for a multi-selection: the panel folds them itself. `kinds` is what
+/// the selection is made of, and drives which groups are on screen.
+function mount(initial = {}, {
+  selection = true, tool = "rectangle", styles = null, kinds = null,
+  actions = undefined, canvas = null, reseed = undefined, theme = null,
+} = {}) {
   let style = { ...initial };
+  let list = styles;
   const patches = [];
+  const opts = [];
+  let canvasColor = canvas;
+  let themeNow = theme;
   const panel = renderProps(host, {
-    getStyle: () => style,
-    setStyle: (patch) => {
+    getStyle: () => list ?? style,
+    setStyle: (patch, o) => {
       patches.push(patch);
+      opts.push(o);
       style = { ...style, ...patch };
     },
     hasSelection: () => selection,
+    // Null rather than absent when a test does not care: the panel treats
+    // "not an array" as "cannot tell", which is what an unwired host gives it.
+    getKinds: () => kinds,
     activeTool: () => tool,
+    reseed,
+    ...(canvas == null ? {} : {
+      getCanvasBackground: () => canvasColor,
+      setCanvasBackground: (c) => {
+        canvasColor = c;
+      },
+    }),
+    ...(theme == null ? {} : {
+      getTheme: () => themeNow,
+      setTheme: (t) => {
+        themeNow = t;
+      },
+    }),
+    actions,
   });
   return {
     panel,
     patches,
+    /// The second argument of each setStyle call, parallel to `patches`.
+    opts,
     style: () => style,
+    canvas: () => canvasColor,
+    theme: () => themeNow,
     set: (next) => {
       style = { ...style, ...next };
+      list = null;
+    },
+    setStyles: (next) => {
+      list = next;
     },
     select: (on) => {
       selection = on;
+    },
+    setKinds: (next) => {
+      kinds = next;
     },
     setTool: (t) => {
       tool = t;
@@ -273,8 +494,47 @@ test("the island renders every group, in Excalidraw's order", () => {
   const labels = byClass(root, "xdp-label").map((n) => n.textContent);
   expect(labels).toEqual([
     "Stroke", "Background", "Fill", "Stroke width", "Stroke style",
-    "Sloppiness", "Edges", "Opacity", "Font size", "Font family",
+    "Sloppiness", "Edges", "Arrow start", "Arrow end", "Opacity",
+    "Font size", "Font family", "Text align", "Vertical align",
   ]);
+  m.panel.dispose();
+});
+
+test("the verb rows and the canvas row exist only once the host wires them", () => {
+  // A row of buttons that do nothing is worse than no row: it teaches the user
+  // the feature is broken rather than absent.
+  const bare = mount();
+  expect(byClass(bare.root(), "xdp-label").map((n) => n.textContent))
+    .not.toContain("Layers");
+  expect(byClass(bare.root(), "xdp-label").map((n) => n.textContent))
+    .not.toContain("Canvas");
+  bare.panel.dispose();
+
+  const wired = mount({}, {
+    canvas: "#ffffff",
+    actions: {
+      reorder() {}, align() {}, distribute() {}, flip() {}, group() {}, ungroup() {},
+    },
+  });
+  const labels = byClass(wired.root(), "xdp-label").map((n) => n.textContent);
+  expect(labels).toEqual([
+    "Stroke", "Background", "Canvas", "Fill", "Stroke width", "Stroke style",
+    "Sloppiness", "Edges", "Arrow start", "Arrow end", "Opacity",
+    "Font size", "Font family", "Text align", "Vertical align",
+    "Layers", "Align", "Flip", "Grouping",
+  ]);
+  wired.panel.dispose();
+});
+
+test("a half-wired actions object drops only the buttons it lacks", () => {
+  // The align row is align + distribute; a host with one and not the other gets
+  // the six buttons it can honour and none of the two it cannot.
+  const m = mount({}, { actions: { align() {} } });
+  const labels = byClass(m.root(), "xdp-label").map((n) => n.textContent);
+  expect(labels).toContain("Align");
+  expect(labels).not.toContain("Layers");
+  expect(labels).not.toContain("Flip");
+  expect(controlsOf(groupNamed(m.root(), "Align"))).toHaveLength(6);
   m.panel.dispose();
 });
 
@@ -448,6 +708,390 @@ test("nothing selected and the select tool active renders nothing at all", () =>
   m.select(false);
   m.panel.refresh();
   expect(host.children).toHaveLength(0);
+  m.panel.dispose();
+});
+
+// --- Mixed multi-selection ---------------------------------------------------
+
+test("a mixed selection presses nothing rather than the first element's value", () => {
+  // The whole bug: a red rectangle and a blue one showed red pressed, so the
+  // button was already "on" and clicking it silently rewrote both.
+  const m = mount({}, {
+    styles: [
+      { strokeColor: "#e03131", strokeWidth: 2, roughness: 1, roundness: { type: 3 } },
+      { strokeColor: "#1971c2", strokeWidth: 4, roughness: 1, roundness: null },
+    ],
+  });
+  const root = m.root();
+  const pressed = (label) => byLabel(root, label).getAttribute("aria-pressed");
+
+  expect(pressed("Stroke: Red")).toBe("false");
+  expect(pressed("Stroke: Blue")).toBe("false");
+  expect(pressed("Stroke width: Bold")).toBe("false");
+  expect(pressed("Stroke width: Extra bold")).toBe("false");
+  expect(pressed("Edges: Round")).toBe("false");
+  expect(pressed("Edges: Sharp")).toBe("false");
+  // And what they agree on still shows.
+  expect(pressed("Sloppiness: Artist")).toBe("true");
+
+  const anyOn = (label) => controlsOf(groupNamed(root, label))
+    .filter((b) => b.classes.has("on")).length;
+  expect(anyOn("Stroke width")).toBe(0);
+  expect(anyOn("Edges")).toBe(0);
+  m.panel.dispose();
+});
+
+test("a mixed colour does not light up the custom swatch either", () => {
+  // It used to light up for any non-preset value, so a disagreement looked like
+  // a deliberate custom colour — and showed whatever the first element had.
+  const m = mount({}, {
+    styles: [{ strokeColor: "#e03131" }, { strokeColor: "#1971c2" }],
+  });
+  const custom = byLabel(m.root(), "Stroke: custom color");
+  expect(custom.classes.has("on")).toBe(false);
+  expect(custom.classes.has("xdp-none")).toBe(true);
+  expect(custom.style.background).toBe("");
+  m.panel.dispose();
+});
+
+test("a mixed opacity says so, since a slider has nowhere indeterminate to sit", () => {
+  const m = mount({}, { styles: [{ opacity: 30 }, { opacity: 100 }] });
+  const range = byLabel(m.root(), "Opacity");
+  expect(range.getAttribute("aria-valuetext")).toBe("Mixed");
+  expect(range.value).toBe(String(DEFAULT_STYLE.opacity));
+  m.panel.dispose();
+});
+
+test("one style in the list is not a disagreement with itself", () => {
+  const m = mount({}, { styles: [{ strokeColor: "#2f9e44" }] });
+  expect(byLabel(m.root(), "Stroke: Green").getAttribute("aria-pressed")).toBe("true");
+  m.panel.dispose();
+});
+
+test("a key absent from the style still falls back to the default", () => {
+  // Two things that both arrive as "no value" and mean opposite things: a hole
+  // in the source object falls back, a disagreement does not.
+  const m = mount({});
+  expect(byLabel(m.root(), "Stroke width: Bold").getAttribute("aria-pressed")).toBe("true");
+  m.setStyles([{ strokeWidth: 2 }, { strokeWidth: 4 }]);
+  m.panel.refresh();
+  expect(byLabel(m.root(), "Stroke width: Bold").getAttribute("aria-pressed")).toBe("false");
+  m.panel.dispose();
+});
+
+// --- Per-type gating ---------------------------------------------------------
+
+test("a text selection hides the rows that would do nothing to it", () => {
+  const m = mount({ backgroundColor: "#ffc9c9" }, { kinds: ["text"] });
+  const root = m.root();
+  const hidden = (label) => groupNamed(root, label).hidden;
+  expect(hidden("Sloppiness")).toBe(true);
+  expect(hidden("Edges")).toBe(true);
+  expect(hidden("Stroke style")).toBe(true);
+  expect(hidden("Stroke width")).toBe(true);
+  expect(hidden("Background")).toBe(true);
+  expect(hidden("Fill")).toBe(true);
+  expect(hidden("Font size")).toBe(false);
+  expect(hidden("Text align")).toBe(false);
+  expect(hidden("Vertical align")).toBe(false);
+  expect(hidden("Stroke")).toBe(false);
+  expect(hidden("Opacity")).toBe(false);
+
+  // Live, not decided once at mount: selecting a rectangle brings them back.
+  m.setKinds(["rectangle"]);
+  m.panel.refresh();
+  expect(hidden("Sloppiness")).toBe(false);
+  expect(hidden("Edges")).toBe(false);
+  expect(hidden("Font size")).toBe(true);
+  expect(hidden("Text align")).toBe(true);
+  m.panel.dispose();
+});
+
+test("the arrowhead rows appear only for an arrow", () => {
+  const m = mount({}, { kinds: ["rectangle"] });
+  expect(groupNamed(m.root(), "Arrow end").hidden).toBe(true);
+  m.setKinds(["arrow"]);
+  m.panel.refresh();
+  expect(groupNamed(m.root(), "Arrow end").hidden).toBe(false);
+  expect(groupNamed(m.root(), "Arrow start").hidden).toBe(false);
+  // An arrow has no corners to round and no background to fill.
+  expect(groupNamed(m.root(), "Edges").hidden).toBe(true);
+  m.panel.dispose();
+});
+
+test("fill needs both a fillable kind and a background", () => {
+  const m = mount({ backgroundColor: "#ffc9c9" }, { kinds: ["ellipse"] });
+  expect(groupNamed(m.root(), "Fill").hidden).toBe(false);
+  m.set({ backgroundColor: TRANSPARENT });
+  m.panel.refresh();
+  expect(groupNamed(m.root(), "Fill").hidden).toBe(true);
+  m.panel.dispose();
+});
+
+test("a host that cannot say what is selected still sees every row", () => {
+  // The select tool with a selection and no getKinds: nothing tells the panel
+  // what it is looking at, so it shows everything rather than guessing.
+  const m = mount({ backgroundColor: "#ffc9c9" }, { tool: "selection" });
+  for (const label of ["Sloppiness", "Edges", "Font size", "Arrow end", "Fill"]) {
+    expect(groupNamed(m.root(), label).hidden).toBe(false);
+  }
+  m.panel.dispose();
+});
+
+// --- Arrowheads, text align, freedraw width ---------------------------------
+
+test("the arrowhead rows write the field the format wants", () => {
+  const m = mount({}, { kinds: ["arrow"] });
+  fire(byLabel(m.root(), "Arrow end: Triangle"), "click");
+  fire(byLabel(m.root(), "Arrow start: None"), "click");
+  fire(byLabel(m.root(), "Arrow end: Diamond"), "click");
+  expect(m.patches).toEqual([
+    { endArrowhead: "triangle" },
+    // Not the string "none" — an element carrying that is one Excalidraw would
+    // never write.
+    { startArrowhead: null },
+    { endArrowhead: "diamond" },
+  ]);
+  m.panel.dispose();
+});
+
+test("an arrow with no endArrowhead shows the arrow the renderer draws", () => {
+  const m = mount({}, { kinds: ["arrow"] });
+  expect(byLabel(m.root(), "Arrow end: Arrow").getAttribute("aria-pressed")).toBe("true");
+  expect(byLabel(m.root(), "Arrow start: None").getAttribute("aria-pressed")).toBe("true");
+  m.panel.dispose();
+});
+
+test("the text align rows emit the keys the pipeline has to carry", () => {
+  const m = mount({}, { kinds: ["text"] });
+  fire(byLabel(m.root(), "Text align: Center"), "click");
+  fire(byLabel(m.root(), "Vertical align: Middle"), "click");
+  expect(m.patches).toEqual([{ textAlign: "center" }, { verticalAlign: "middle" }]);
+  m.panel.dispose();
+});
+
+test("the width buttons halve themselves for a freedraw selection", () => {
+  const m = mount({ strokeWidth: 1 }, { kinds: ["freedraw"] });
+  // 1 px on a freedraw is Excalidraw's "medium", not its "thin".
+  expect(byLabel(m.root(), "Stroke width: Bold").getAttribute("aria-pressed")).toBe("true");
+  expect(byLabel(m.root(), "Stroke width: Thin").getAttribute("aria-pressed")).toBe("false");
+
+  fire(byLabel(m.root(), "Stroke width: Extra bold"), "click");
+  expect(m.patches).toEqual([{ strokeWidth: 2 }]);
+
+  // And a rectangle gets the ordinary table from the same buttons.
+  m.setKinds(["rectangle"]);
+  m.panel.refresh();
+  fire(byLabel(m.root(), "Stroke width: Extra bold"), "click");
+  expect(m.patches[1]).toEqual({ strokeWidth: 4 });
+  m.panel.dispose();
+});
+
+// --- Sloppiness re-seed ------------------------------------------------------
+
+test("a sloppiness change asks for a new sketch, as one undo entry", () => {
+  // Without the re-roll, rough.js multiplies the same random draws by the new
+  // roughness: one sketch at three weights rather than three different hands.
+  // The hint rides with the patch so the roughness and the seed land together —
+  // an undo between them would leave the new roughness on the old seed.
+  const m = mount();
+  fire(byLabel(m.root(), "Sloppiness: Cartoonist"), "click");
+  expect(m.patches).toEqual([{ roughness: 2 }]);
+  expect(m.opts[0]).toEqual({ resketch: true });
+
+  // With nothing selected this is a preference for the next shape, and that
+  // shape is minted with a fresh seed anyway.
+  m.select(false);
+  m.setTool("rectangle");
+  m.panel.refresh();
+  fire(byLabel(m.root(), "Sloppiness: Artist"), "click");
+  expect(m.opts[1]).toEqual({ resketch: false });
+  m.panel.dispose();
+});
+
+test("only the sloppiness row asks to re-sketch", () => {
+  const m = mount();
+  fire(byLabel(m.root(), "Stroke width: Thin"), "click");
+  expect(m.opts[0]).toBeUndefined();
+  m.panel.dispose();
+});
+
+test("a host with a reseed callback gets that instead of the hint", () => {
+  // Suppressed rather than sent as well, so the seed is never re-rolled twice.
+  let seeds = 0;
+  const m = mount({}, { reseed: () => { seeds += 1; } });
+  fire(byLabel(m.root(), "Sloppiness: Cartoonist"), "click");
+  expect(seeds).toBe(1);
+  expect(m.opts[0]).toEqual({ resketch: false });
+
+  m.select(false);
+  m.panel.refresh();
+  fire(byLabel(m.root(), "Sloppiness: Artist"), "click");
+  expect(seeds).toBe(1);
+  m.panel.dispose();
+});
+
+// --- The verbs ---------------------------------------------------------------
+
+test("the layers row calls reorder with the four directions", () => {
+  const calls = [];
+  const m = mount({}, { actions: { reorder: (how) => calls.push(how) } });
+  for (const label of ["Send to back", "Send backward", "Bring forward", "Bring to front"]) {
+    fire(byLabel(m.root(), `Layers: ${label}`), "click");
+  }
+  expect(calls).toEqual(["back", "backward", "forward", "front"]);
+  m.panel.dispose();
+});
+
+test("align, distribute and flip pass the edge and the axis through", () => {
+  // These exact strings are what `ops::Edge::parse` and `ops::Axis::parse`
+  // accept (`crates/xd-core/src/ops.rs:277-282`). An unknown one is a deliberate
+  // no-op in the core rather than a scrambled drawing, which makes a typo here
+  // silent — hence pinning them.
+  const calls = [];
+  const m = mount({}, {
+    kinds: ["rectangle", "ellipse", "diamond"],
+    actions: {
+      align: (e) => calls.push(["align", e]),
+      distribute: (a) => calls.push(["distribute", a]),
+      flip: (a) => calls.push(["flip", a]),
+    },
+  });
+  fire(byLabel(m.root(), "Align: Align left"), "click");
+  fire(byLabel(m.root(), "Align: Center vertically"), "click");
+  fire(byLabel(m.root(), "Align: Distribute horizontally"), "click");
+  fire(byLabel(m.root(), "Flip: Flip vertically"), "click");
+  expect(calls).toEqual([
+    ["align", "left"], ["align", "centerV"],
+    ["distribute", "horizontal"], ["flip", "vertical"],
+  ]);
+  m.panel.dispose();
+});
+
+test("align wants two elements and distribute wants three", () => {
+  // The core's own guards: `ops::align` returns no_change below 2 and
+  // `ops::distribute` below 3 (`crates/xd-core/src/ops.rs:349,385`), and
+  // `ops::flip` takes one — a single element flips in place. Enabling a button
+  // the model will refuse is a button that does nothing. Dimmed rather than
+  // absent, so the row keeps its shape and the user learns what it wants.
+  const m = mount({}, {
+    kinds: ["rectangle"],
+    actions: { align() {}, distribute() {}, group() {}, ungroup() {} },
+  });
+  const btn = (label) => byLabel(m.root(), label);
+  expect(btn("Align: Align left").disabled).toBe(true);
+  expect(btn("Align: Distribute horizontally").disabled).toBe(true);
+  expect(btn("Grouping: Group").disabled).toBe(true);
+  // Ungroup takes one, because clicking inside a group selects a single member.
+  expect(btn("Grouping: Ungroup").disabled).toBe(false);
+
+  m.setKinds(["rectangle", "ellipse"]);
+  m.panel.refresh();
+  expect(btn("Align: Align left").disabled).toBe(false);
+  expect(btn("Align: Distribute horizontally").disabled).toBe(true);
+  expect(btn("Grouping: Group").disabled).toBe(false);
+
+  m.setKinds(["rectangle", "ellipse", "diamond"]);
+  m.panel.refresh();
+  expect(btn("Align: Distribute horizontally").disabled).toBe(false);
+  m.panel.dispose();
+});
+
+test("a disabled verb does nothing when clicked", () => {
+  const calls = [];
+  const m = mount({}, { kinds: ["rectangle"], actions: { align: () => calls.push(1) } });
+  fire(byLabel(m.root(), "Align: Align left"), "click");
+  expect(calls).toEqual([]);
+  m.panel.dispose();
+});
+
+test("the verb rows are hidden with nothing selected", () => {
+  // The panel is showing defaults for the next shape; there is nothing to
+  // reorder or flip.
+  const m = mount({}, {
+    selection: false, tool: "rectangle", kinds: [],
+    actions: { reorder() {}, flip() {} },
+  });
+  expect(groupNamed(m.root(), "Layers").hidden).toBe(true);
+  expect(groupNamed(m.root(), "Flip").hidden).toBe(true);
+  m.select(true);
+  m.setKinds(["rectangle"]);
+  m.panel.refresh();
+  expect(groupNamed(m.root(), "Layers").hidden).toBe(false);
+  m.panel.dispose();
+});
+
+test("every verb button is named and reachable, like every other control", () => {
+  const m = mount({}, {
+    canvas: "#ffffff",
+    actions: { reorder() {}, align() {}, distribute() {}, flip() {}, group() {}, ungroup() {} },
+  });
+  for (const b of [...walk(m.root())].filter((n) => n.tagName === "BUTTON")) {
+    expect(b.type).toBe("button");
+    expect(b.title).toBeTruthy();
+    expect(b.getAttribute("aria-label")).toBeTruthy();
+  }
+  m.panel.dispose();
+});
+
+// --- Canvas background -------------------------------------------------------
+
+test("the canvas row writes through its own callback, not setStyle", () => {
+  // viewBackgroundColor is appState, not a field on any element, so a patch
+  // through setStyle would be written onto every selected shape.
+  const m = mount({}, { canvas: "#ffffff" });
+  fire(byLabel(m.root(), "Canvas: Pale yellow"), "click");
+  expect(m.canvas()).toBe("#fffce8");
+  expect(m.patches).toEqual([]);
+  m.panel.dispose();
+});
+
+test("the canvas row marks the colour the drawing currently has", () => {
+  const m = mount({}, { canvas: "#f5faff" });
+  expect(byLabel(m.root(), "Canvas: Pale blue").getAttribute("aria-pressed")).toBe("true");
+  expect(byLabel(m.root(), "Canvas: White").getAttribute("aria-pressed")).toBe("false");
+  m.panel.dispose();
+});
+
+test("the canvas row survives a selection that hides everything else", () => {
+  // It is a property of the drawing, so nothing about the selection can hide it.
+  const m = mount({}, { canvas: "#ffffff", kinds: ["text"] });
+  expect(groupNamed(m.root(), "Canvas").hidden).toBe(false);
+  m.panel.dispose();
+});
+
+// --- Theme -------------------------------------------------------------------
+
+test("the theme row is absent until a host can write appState.theme", () => {
+  const bare = mount();
+  expect(byClass(bare.root(), "xdp-label").map((n) => n.textContent)).not.toContain("Theme");
+  bare.panel.dispose();
+
+  const wired = mount({}, { theme: "light" });
+  expect(byClass(wired.root(), "xdp-label").map((n) => n.textContent)).toContain("Theme");
+  wired.panel.dispose();
+});
+
+test("the theme row writes appState, not a style patch", () => {
+  // `theme` is not a style key. Through setStyle it would be written onto every
+  // selected element, which is a field Excalidraw would never put there.
+  const m = mount({}, { theme: "light", kinds: ["rectangle"] });
+  expect(byLabel(m.root(), "Theme: Light").getAttribute("aria-pressed")).toBe("true");
+
+  fire(byLabel(m.root(), "Theme: Dark"), "click");
+  expect(m.theme()).toBe("dark");
+  expect(m.patches).toEqual([]);
+
+  m.panel.refresh();
+  expect(byLabel(m.root(), "Theme: Dark").getAttribute("aria-pressed")).toBe("true");
+  expect(byLabel(m.root(), "Theme: Light").getAttribute("aria-pressed")).toBe("false");
+  m.panel.dispose();
+});
+
+test("a document with no theme reads as light, and the row still shows", () => {
+  // The renderer treats anything but "dark" as light, so that is what is pressed.
+  const m = mount({}, { theme: "light", kinds: ["text"] });
+  expect(groupNamed(m.root(), "Theme").hidden).toBe(false);
   m.panel.dispose();
 });
 
