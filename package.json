@@ -1,7 +1,7 @@
 {
   "name": "excalidraw-rs-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "description": "The ui/ half of excalidraw-rs. No dependencies and no bundler on purpose: every module under ui/ is a plain ES module loaded from disk, exactly as term.hut serves its own, so the portable view can be copied across without a build step following it.",

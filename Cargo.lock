@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "excalidraw-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5182,7 +5182,7 @@ dependencies = [
 
 [[package]]
 name = "xd-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -5191,7 +5191,7 @@ dependencies = [
 
 [[package]]
 name = "xd-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.2.17",
  "serde",

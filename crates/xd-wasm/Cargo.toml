@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-xd-core = { path = "../xd-core", version = "0.1.0" }
+xd-core = { path = "../xd-core", version = "0.2.0" }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 # The same features as xd-core, spelled out rather than inherited through
