@@ -27,11 +27,14 @@
 // a finding about the fake and not something to paper over.
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
+import rough from "../vendor/roughjs/rough.esm.js";
 import {
   FakeNode, installDom, uninstallDom, recorder, callsOf, flushFrames, leakedListeners,
 } from "./support/harness.js";
 import { openDoc as openReal } from "./wasmHarness.js";
 import { renderExcalidraw } from "../src/excalidrawEdit.js";
+import { drawElement } from "../src/excalidrawView.js";
+import { roughOptions } from "../src/excalidrawScene.js";
 
 // --- a scene with one of everything ------------------------------------------
 //
@@ -378,6 +381,372 @@ test("the text overlay paints the element it is editing", async () => {
   const c = paintFrame();
   expect(c.calls.length).toBeGreaterThan(50);
   dispose();
+});
+
+// --- what each element branch actually asks Rough for ------------------------
+//
+// The tests above prove the wiring runs. These prove it runs with the right
+// arguments, which is a different and much easier thing to get wrong: nothing
+// about `continuousPath`, `curveFitting`, a per-axis corner radius or an
+// arrowhead's aim is visible in "did a stroke happen". `excalidrawScene.test.js`
+// pins the option *mapping*; this pins the option *call sites*, and the call
+// sites were where the sloppiness bug lived — both of them, inverted, while the
+// mapping test stayed green.
+//
+// `drawElement` takes its `rc` as an argument, so the seam is already there: a
+// stand-in backed by a real generator records what was asked for and still hands
+// back a real Drawable, which the arrowhead code downstream needs to read its
+// tangent off.
+
+function roughRecorder() {
+  const gen = rough.generator();
+  const calls = [];
+  const wrap = (name) => (...args) => {
+    const drawable = gen[name](...args);
+    calls.push({ name, args, options: args[args.length - 1], drawable });
+    return drawable;
+  };
+  return {
+    calls,
+    last: (name) => calls.filter((c) => !name || c.name === name).at(-1),
+    rectangle: wrap("rectangle"),
+    path: wrap("path"),
+    polygon: wrap("polygon"),
+    ellipse: wrap("ellipse"),
+    curve: wrap("curve"),
+    linearPath: wrap("linearPath"),
+    line: wrap("line"),
+  };
+}
+
+const shape = (over) => base({ id: "s", x: 0, y: 0, width: 200, height: 120, ...over });
+
+/// Draw one element in isolation and hand back both recorders.
+const draw = (element, scene = {}) => {
+  const ctx = recorder();
+  const rc = roughRecorder();
+  drawElement(ctx, rc, element, scene, new Map());
+  return { ctx, rc };
+};
+
+/// The gaps between the sub-paths of a Drawable, split into the ones that are
+/// meant to be there and the ones that are the bug.
+///
+/// Rough draws each path segment twice, so a `move` either jumps back to the
+/// start of the segment it is re-drawing — a long, expected hop — or steps to
+/// the next segment, where it should land exactly on the previous one's end.
+/// Only the second kind is a joint, and at Cartoonist without
+/// `preserveVertices` every one of them opens up.
+function jointGaps(drawable) {
+  const ops = drawable.sets.find((s) => s.type === "path").ops;
+  const gaps = [];
+  let end = null;
+  for (const op of ops) {
+    if (op.op === "move") {
+      if (end) gaps.push(Math.hypot(op.data[0] - end[0], op.data[1] - end[1]));
+      end = [op.data[0], op.data[1]];
+    } else if (op.op === "bcurveTo") {
+      end = [op.data[4], op.data[5]];
+    }
+  }
+  // Every other gap is a re-draw hop; the joints are the ones between them.
+  return gaps.filter((_, i) => i % 2 === 1);
+}
+
+test("a rounded rectangle holds its joints together at every sloppiness", () => {
+  // The "unconnected" half of the reported bug. A path() is drawn segment by
+  // segment, so without preserveVertices each corner's endpoints wander
+  // independently — measured 4.7-6.1px of daylight at all eight joints of the
+  // app's *default* shape. Excalidraw passes continuousPath true here
+  // (shape.ts:786-795) and measures 0.00px at every joint at every seed.
+  for (const seed of [12345, 7, 999999]) {
+    for (const roughness of [0, 1, 2]) {
+      const element = shape({ type: "rectangle", roundness: { type: 3 }, seed, roughness });
+      const { rc } = draw(element);
+      const call = rc.last("path");
+      expect(call).toBeDefined();
+      expect(call.options.preserveVertices).toBe(true);
+      for (const gap of jointGaps(call.drawable)) {
+        expect(gap).toBeCloseTo(0, 10);
+      }
+
+      // And the counterfactual, so this test fails if the flag is dropped
+      // again rather than only if the path changes: the same path string
+      // without it comes apart, and only at Cartoonist.
+      const loose = rough.generator().path(call.args[0], roughOptions(element));
+      const worst = Math.max(...jointGaps(loose));
+      if (roughness === 2) expect(worst).toBeGreaterThan(4);
+      else expect(worst).toBeCloseTo(0, 10);
+    }
+  }
+});
+
+test("the continuousPath fix is a no-op at Architect and Artist", () => {
+  // preserveVertices is already true below Cartoonist, so every existing
+  // drawing at the two tidier settings renders bit-identically before and
+  // after. This is the regression that stops a future change to the flag from
+  // silently redrawing files nobody edited.
+  for (const roughness of [0, 1]) {
+    const element = shape({ type: "rectangle", roundness: { type: 3 }, roughness });
+    const call = draw(element).rc.last("path");
+    const gen = rough.generator();
+    const withFlag = gen.path(call.args[0], roughOptions(element, { continuousPath: true }));
+    const without = gen.path(call.args[0], roughOptions(element));
+    expect(JSON.stringify(without.sets)).toBe(JSON.stringify(withFlag.sets));
+  }
+  // At Cartoonist it is emphatically not a no-op, which is the whole point.
+  const cartoonist = shape({ type: "rectangle", roundness: { type: 3 }, roughness: 2 });
+  const gen = rough.generator();
+  const path = draw(cartoonist).rc.last("path").args[0];
+  expect(JSON.stringify(gen.path(path, roughOptions(cartoonist)).sets))
+    .not.toBe(JSON.stringify(gen.path(path, roughOptions(cartoonist, { continuousPath: true })).sets));
+});
+
+test("a sharp rectangle is allowed to come apart, because Excalidraw's does", () => {
+  // shape.ts:797-810 passes continuousPath false for a box with square corners.
+  // One primitive, no segment joints to hold, and the corner gaps are part of
+  // the look — so this must not be "fixed" alongside the rounded branch.
+  const { rc } = draw(shape({ type: "rectangle", roughness: 2 }));
+  expect(rc.last().name).toBe("rectangle");
+  expect(rc.last().options.preserveVertices).toBe(false);
+});
+
+test("a line does not force preserveVertices, which is the other inversion", () => {
+  // The flag was passed true here and omitted on the rounded box: exactly
+  // backwards from shape.ts:875, which passes false for every line and arrow.
+  const line = shape({ type: "line", roughness: 2, points: [[0, 0], [100, 40], [200, 0]] });
+  expect(draw(line).rc.last().options.preserveVertices).toBe(false);
+  const arrow = shape({ type: "arrow", roughness: 2, points: [[0, 0], [200, 0]] });
+  expect(draw(arrow).rc.last("linearPath").options.preserveVertices).toBe(false);
+});
+
+test("a diamond with round edges is drawn as a path, not a polygon", () => {
+  // drawDiamond always called rc.polygon(), so element.roundness was never
+  // read and "Round" edges did nothing at all to a diamond.
+  const sharp = draw(shape({ type: "diamond" })).rc.last();
+  expect(sharp.name).toBe("polygon");
+
+  const round = draw(shape({ type: "diamond", roundness: { type: 2 } })).rc.last();
+  expect(round.name).toBe("path");
+  expect(round.options.preserveVertices).toBe(true); // shape.ts:847
+  // Per-axis radii (shape.ts:827-834): a 200x120 diamond's proportional insets
+  // are a quarter of the half-width and a quarter of the half-height, so the
+  // path starts at (100 + 25, 0 + 15) and they are visibly different numbers.
+  expect(round.args[0]).toContain("M 125 15");
+});
+
+test("an ellipse stops shrinking inside its own selection box", () => {
+  // Rough's default curveFitting spends 5% of the radius on randomness, scaled
+  // by roughness: a 200-wide ellipse drew 194.2 wide at Cartoonist, pulling
+  // ~6px inside its box, where Excalidraw's spills slightly outside at 203.2.
+  const drawnWidth = (roughness) => {
+    const call = draw(shape({ type: "ellipse", roughness })).rc.last("ellipse");
+    expect(call.options.curveFitting).toBe(1);
+    let min = Infinity;
+    let max = -Infinity;
+    for (const set of call.drawable.sets) {
+      for (const op of set.ops) {
+        for (let i = 0; i < op.data.length; i += 2) {
+          min = Math.min(min, op.data[i]);
+          max = Math.max(max, op.data[i]);
+        }
+      }
+    }
+    return max - min;
+  };
+  expect(drawnWidth(0)).toBeCloseTo(200.1, 1);
+  expect(drawnWidth(1)).toBeCloseTo(203.9, 1);
+  expect(drawnWidth(2)).toBeCloseTo(203.2, 1);
+});
+
+test("a line's primitive comes from its roundness, not from its point count", () => {
+  // shape.ts:901-913. Sharp means straight segments; a line created here draws
+  // curved and reopens in Excalidraw as a linearPath, which is a round-trip
+  // divergence rather than a missing line.
+  const pts = [[0, 0], [100, 40], [200, 0]];
+  expect(draw(shape({ type: "line", points: pts })).rc.last().name).toBe("linearPath");
+  expect(draw(shape({ type: "line", points: pts, roundness: { type: 2 } })).rc.last().name)
+    .toBe("curve");
+  // A two-point line is the same ops either way, so nothing existing moves.
+  expect(draw(shape({ type: "line", points: [[0, 0], [200, 0]] })).rc.last().name)
+    .toBe("linearPath");
+  // A closed line with a fill needs an inside for the fill to land in.
+  const loop = shape({
+    type: "line", backgroundColor: "#ffc9c9", fillStyle: "solid",
+    points: [[0, 0], [100, 40], [200, 0], [3, 2]],
+  });
+  expect(draw(loop).rc.last().name).toBe("polygon");
+});
+
+// --- arrowheads --------------------------------------------------------------
+
+const lineTos = (ctx) =>
+  ctx.calls.filter((c) => c[0] === "moveTo" || c[0] === "lineTo").map((c) => [c[1], c[2]]);
+
+test("an arrowhead is sized and angled the way Excalidraw sizes and angles it", () => {
+  // Was: size 15 + (w-1)x2 at a 25.7 degree half-spread, unclamped. Excalidraw
+  // uses 25px for `arrow` (bounds.ts:713-715) at 20 degrees
+  // (bounds.ts:734-742), and clamps to half the last segment
+  // (bounds.ts:831-834).
+  const arrow = shape({
+    type: "arrow", roughness: 0, strokeWidth: 2,
+    points: [[0, 0], [200, 0]], endArrowhead: "arrow",
+  });
+  const pts = lineTos(draw(arrow).ctx);
+  const tip = pts.find((p) => Math.abs(p[0] - 200) < 0.001);
+  expect(tip).toBeDefined();
+  const barbs = pts.filter((p) => p !== tip);
+  for (const barb of barbs) {
+    // 25px back from the tip, at 20 degrees off the shaft.
+    expect(Math.hypot(200 - barb[0], 0 - barb[1])).toBeCloseTo(25, 6);
+    expect(Math.abs(Math.atan2(barb[1] - 0, barb[0] - 200)) * (180 / Math.PI))
+      .toBeCloseTo(180 - 20, 6);
+  }
+});
+
+test("an arrowhead is scaled down rather than dwarfing a short arrow", () => {
+  // min(size, lastSegment x 0.5): on a 20px arrow the head is 10px, not the 25
+  // it would like to be, and not the unclamped 17 the old code drew.
+  const short = shape({
+    type: "arrow", roughness: 0, strokeWidth: 2, width: 20, height: 0,
+    points: [[0, 0], [20, 0]], endArrowhead: "arrow",
+  });
+  const pts = lineTos(draw(short).ctx);
+  const tip = pts.find((p) => Math.abs(p[0] - 20) < 0.001);
+  for (const barb of pts.filter((p) => p !== tip)) {
+    expect(Math.hypot(20 - barb[0], -barb[1])).toBeCloseTo(10, 6);
+  }
+});
+
+test("a diamond arrowhead is a diamond and not a plain open V", () => {
+  // `diamond` had no case at all and fell through to the two-stroke V, so an
+  // arrow imported from Excalidraw with a diamond head drew as a normal arrow.
+  const el = shape({
+    type: "arrow", roughness: 0, strokeWidth: 2,
+    points: [[0, 0], [200, 0]], endArrowhead: "diamond",
+  });
+  const { ctx } = draw(el);
+  const pts = lineTos(ctx);
+  expect(pts).toHaveLength(4);          // tip, barb, back, barb
+  expect(kinds({ calls: ctx.calls })).toContain("fill");
+  // 12px long (bounds.ts:717-719), clamped by a quarter of the segment, and
+  // twice as long as it is deep: the back point sits 2x the head size behind
+  // the tip, on the shaft.
+  const [tip, , back] = pts;
+  expect(tip[0]).toBeCloseTo(200, 6);
+  expect(back[0]).toBeCloseTo(200 - 24, 6);
+  expect(back[1]).toBeCloseTo(0, 6);
+});
+
+test("an arrowhead aims along the curve it is on, not along the last chord", () => {
+  // bounds.ts:790-809 evaluates the *rendered* cubic at t = 0.3. On a curved
+  // arrow the tangent and the chord of the last two points are different
+  // directions, so a head aimed at the chord visibly hangs off the line.
+  const curved = shape({
+    type: "arrow", roughness: 0, strokeWidth: 2, roundness: { type: 2 },
+    points: [[0, 0], [100, 100], [200, 0]], endArrowhead: "arrow",
+  });
+  const pts = lineTos(draw(curved).ctx);
+  const tip = pts[1];
+  const bisector = Math.atan2(
+    (pts[0][1] + pts[2][1]) / 2 - tip[1],
+    (pts[0][0] + pts[2][0]) / 2 - tip[0],
+  );
+  // The chord of the last two points rises at exactly -45 degrees; the curve's
+  // tangent where it ends does not, so the head is aimed somewhere else.
+  const chord = Math.atan2(0 - 100, 200 - 100) + Math.PI;
+  expect(Math.abs(bisector - chord)).toBeGreaterThan(0.05);
+  // Sanity: it still points backwards along *something*, i.e. up and to the
+  // left of the tip rather than off into space.
+  expect(bisector).toBeGreaterThan(Math.PI / 2);
+});
+
+test("an absent endArrowhead still draws one, and a null one draws none", () => {
+  // This matches upstream (shape.ts:915-916) and is not a bug to fix: an
+  // undefined endArrowhead means "arrow", and only an explicit null means none.
+  const pts = [[0, 0], [200, 0]];
+  expect(lineTos(draw(shape({ type: "arrow", points: pts })).ctx).length).toBeGreaterThan(0);
+  expect(lineTos(draw(shape({ type: "arrow", points: pts, endArrowhead: null })).ctx))
+    .toHaveLength(0);
+  // A start arrowhead is opt-in, and points the other way.
+  const both = draw(shape({
+    type: "arrow", roughness: 0, points: pts, startArrowhead: "arrow", endArrowhead: "arrow",
+  }));
+  const xs = lineTos(both.ctx).map((p) => p[0]);
+  expect(Math.min(...xs)).toBeLessThan(50);
+  expect(Math.max(...xs)).toBeGreaterThan(150);
+});
+
+// --- the rest of the drawing contract ----------------------------------------
+
+test("a deleted element is not painted", () => {
+  // Tombstones stay in the file for undo and for merging another client's
+  // edits. `parseScene` strips them on the read path, but the editor paints
+  // straight from the live document, where a deletion *is* isDeleted: true.
+  const { ctx, rc } = draw(shape({ type: "rectangle", isDeleted: true }));
+  expect(rc.calls).toHaveLength(0);
+  expect(ctx.calls).toHaveLength(0);
+  // And an undeleted one still paints, so this is not just an early return.
+  expect(draw(shape({ type: "rectangle", isDeleted: false })).rc.calls).toHaveLength(1);
+});
+
+test("every element is drawn with round joins and round caps", () => {
+  // renderElement.ts:330-331. Canvas defaults to butt caps and mitre joins,
+  // which leaves Rough's multi-stroke passes square-ended: small joins read as
+  // notches and a gap up to strokeWidth/2 that round caps would close stays
+  // open.
+  for (const type of ["rectangle", "diamond", "ellipse", "line", "arrow", "freedraw", "text"]) {
+    const { ctx } = draw(shape({
+      type, points: [[0, 0], [100, 40]], text: "hi", fontSize: 20, fontFamily: 5,
+    }));
+    const set = (name) => ctx.calls.filter((c) => c[0] === `set:${name}`).map((c) => c[1]);
+    expect(set("lineJoin")[0]).toBe("round");
+    expect(set("lineCap")[0]).toBe("round");
+  }
+});
+
+test("dark mode filters the colours that reach the canvas, not just the chrome", () => {
+  // A dark-authored diagram and a light-authored one are the same file in
+  // Excalidraw and different pictures; painting literal colours makes this
+  // renderer disagree with the one that wrote them.
+  const dark = { appState: { theme: "dark" } };
+  expect(draw(shape({ type: "rectangle" }), dark).rc.last().options.stroke).toBe("#d3d3d3");
+  expect(draw(shape({ type: "rectangle" }), {}).rc.last().options.stroke).toBe("#1e1e1e");
+
+  // Text and freedraw paint themselves, so they need it applied by hand.
+  const text = draw(shape({ type: "text", text: "hi", fontSize: 20, fontFamily: 5 }), dark).ctx;
+  expect(text.calls.some((c) => c[0] === "set:fillStyle" && c[1] === "#d3d3d3")).toBe(true);
+  const free = draw(shape({
+    type: "freedraw", points: [[0, 0], [10, 12], [24, 30], [40, 40]],
+  }), dark).ctx;
+  expect(free.calls.some((c) => c[0] === "set:fillStyle" && c[1] === "#d3d3d3")).toBe(true);
+});
+
+test("a freedraw outline is closed with quadratics, not straight segments", () => {
+  // Excalidraw builds the path with getSvgPathFromStroke (utils.ts:1005-1036),
+  // whose smooth quadratics are what stop the stroke's edges reading as
+  // facets and its tip from tapering on the wrong curve.
+  const { ctx } = draw(shape({
+    type: "freedraw", strokeWidth: 2,
+    points: [[0, 0], [10, 12], [24, 30], [40, 40], [60, 44]],
+    pressures: [0.4, 0.5, 0.6, 0.5, 0.4],
+  }));
+  expect(callsOf({ calls: ctx.calls }, "quadraticCurveTo").length).toBeGreaterThan(4);
+  expect(callsOf({ calls: ctx.calls }, "lineTo")).toHaveLength(0);
+  expect(callsOf({ calls: ctx.calls }, "fill").length).toBe(1);
+});
+
+test("a recorded-pressure stroke and a simulated one are fed differently", () => {
+  // getStroke invents pressure from point spacing when simulatePressure is on,
+  // and Excalidraw passes bare 2-tuples so it does (shape.ts:1205-1211).
+  // Passing a third element either way makes it trust a number nobody
+  // measured, and the two produce visibly different outlines.
+  const points = [[0, 0], [10, 12], [24, 30], [40, 40], [60, 44]];
+  const pressures = [0.1, 0.9, 0.2, 0.8, 0.3];
+  const path = (over) => JSON.stringify(
+    draw(shape({ type: "freedraw", strokeWidth: 2, points, pressures, ...over })).ctx.calls,
+  );
+  expect(path({ simulatePressure: true })).not.toBe(path({ simulatePressure: false }));
 });
 
 // --- and it still tears down -------------------------------------------------
