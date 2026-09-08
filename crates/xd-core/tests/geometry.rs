@@ -343,6 +343,35 @@ fn a_deleted_element_is_not_clickable() {
     assert_eq!(hit_test_scene(&els, 60.0, 45.0, 10.0), Some(0));
 }
 
+#[test]
+fn a_locked_element_is_clicked_straight_through() {
+    // Locked in Excalidraw means transparent to the pointer, not merely
+    // unselectable. Filtering the answer in the caller instead leaves the locked
+    // element swallowing clicks — a locked background photo becomes an
+    // unclickable hole over everything behind it.
+    let els = vec![
+        rect(json!({ "id": "under", "backgroundColor": "#ffc9c9" })),
+        rect(json!({ "id": "pinned", "backgroundColor": "#a5d8ff", "locked": true })),
+    ];
+    assert_eq!(hit_test_scene(&els, 60.0, 45.0, 10.0), Some(0));
+    // `locked: false` is the common spelling in the wild and must not filter.
+    let unlocked = vec![
+        rect(json!({ "id": "under", "backgroundColor": "#ffc9c9" })),
+        rect(json!({ "id": "free", "backgroundColor": "#a5d8ff", "locked": false })),
+    ];
+    assert_eq!(hit_test_scene(&unlocked, 60.0, 45.0, 10.0), Some(1));
+}
+
+#[test]
+fn a_marquee_leaves_locked_elements_where_they_are() {
+    let els = vec![
+        rect(json!({ "id": "free" })),
+        rect(json!({ "id": "pinned", "locked": true })),
+    ];
+    let all = Bounds::new(-1000.0, -1000.0, 1000.0, 1000.0);
+    assert_eq!(marquee_hits(&els, &all, false), vec![0]);
+}
+
 // --- marquee ----------------------------------------------------------------
 
 #[test]

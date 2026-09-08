@@ -124,6 +124,69 @@ pub enum Command {
         binding: Option<Binding>,
     },
 
+    /// Put a text element inside a container as its label.
+    ///
+    /// Like [`Command::Bind`] this is two-sided — the text names the container
+    /// in `containerId`, the container names the text back in `boundElements`
+    /// as `{id, type: "text"}` — and for the same reason: Excalidraw trusts
+    /// both halves and misbehaves around half a binding. It is a separate
+    /// command rather than a case of `Bind` because `Bind` is
+    /// arrow-endpoint-shaped: it names one of two ends and carries a
+    /// `focus`/`gap` pair, and a label has neither an end nor a gap.
+    ///
+    /// A text already bound to another container is detached from it first, so
+    /// the old container cannot keep a back-reference to a label it no longer
+    /// holds.
+    BindLabel { container: String, text: String },
+
+    /// Take a label out of its container, both halves. The text survives as a
+    /// free-floating element, which is what Excalidraw's own unbind does.
+    UnbindLabel { text: String },
+
+    /// Write an entry into the scene's `files` map — the image bytes an
+    /// `image` element's `fileId` names.
+    ///
+    /// The map is held as raw JSON (`Scene::files`) because nothing in this
+    /// crate decides anything about its contents, and this command keeps that
+    /// property: the entry crosses through untouched. It exists so that
+    /// inserting an image is *one* undoable act. Without it the element could
+    /// be undone and its bytes could not, which is a document that renders a
+    /// grey placeholder for a file nobody can reach.
+    PutFile { id: String, entry: Value },
+
+    /// Take an entry out of `files`. The inverse of [`Command::PutFile`], and
+    /// what undoing an image insert runs.
+    DropFile { id: String },
+
+    /// Merge keys into the scene's `appState` — the canvas background colour,
+    /// the theme, the grid size. A `null` value removes a key.
+    ///
+    /// **Shallow, and deliberately incurious.** `Scene::app_state` is a raw
+    /// JSON map because nothing in this crate decides anything about its
+    /// contents, and this command is written to keep that true: it merges the
+    /// keys it is given, leaves every other key alone — including nested
+    /// objects it has never heard of — and models nothing. A deep merge would
+    /// have to have opinions about which subtrees are records and which are
+    /// values, and it would be wrong about somebody's `collaborators` map on the
+    /// first release that changed it.
+    SetAppState { fields: Map<String, Value> },
+
+    /// Re-roll the `seed` of the named elements.
+    ///
+    /// This is the one sanctioned way a seed ever changes on an element that
+    /// already has one, and it is deliberately its own command rather than a
+    /// relaxation of [`Command::Patch`]'s `seed` filter. The difference is
+    /// intent: a patch carrying a seed is a caller that did not mean it —
+    /// forwarding an element's own JSON back through an edit — and dropping it
+    /// keeps the strokes from twitching on every keystroke. A `Reseed` is a
+    /// user asking for a *different sketch of the same shape*, which is what
+    /// Excalidraw's sloppiness buttons do (`actionProperties.tsx` re-rolls
+    /// `seed` alongside `roughness`) and the reason changing sloppiness here
+    /// reads as "the line got bolder" instead of "the hand changed".
+    ///
+    /// Recorded like any other write, so undo puts the old seed back exactly.
+    Reseed { ids: Vec<String> },
+
     /// Several commands as one undo entry — dragging a multi-selection is one
     /// `Batch` of one `Patch` per element, and one press of undo puts all of
     /// them back.

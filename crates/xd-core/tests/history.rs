@@ -94,7 +94,11 @@ fn seed_json() -> String {
                 "link": "https://example.com", "index": "a7"
             }
         ],
-        "appState": { "gridSize": null, "viewBackgroundColor": "#ffffff" },
+        "appState": {
+            "gridSize": null,
+            "viewBackgroundColor": "#ffffff",
+            "nestedUnknown": { "deep": [1, 2, 3] }
+        },
         "files": { "someFile": { "mimeType": "image/png" } }
     })
     .to_string()
@@ -796,6 +800,322 @@ fn deleting_an_arrow_clears_the_shapes_that_named_it() {
 }
 
 // ---------------------------------------------------------------------------
+// Container-bound labels
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deleting_a_container_takes_its_label_with_it() {
+    let mut doc = seed_doc();
+    doc.apply(Command::Delete {
+        ids: vec!["rect".to_string()],
+    });
+    // The failure this pins is silent: the label used to survive with
+    // `containerId: "rect"` naming an element the file no longer contains, and
+    // Excalidraw opens that file and then behaves oddly around the ghost.
+    assert!(doc.index_of("label").is_none(), "the label outlived its container");
+
+    doc.undo().unwrap();
+    assert_eq!(get(&doc, "label").container_id.as_deref(), Some("rect"));
+    assert!(get(&doc, "rect")
+        .bound_elements
+        .as_ref()
+        .is_some_and(|v| v.iter().any(|b| b.id == "label")));
+}
+
+#[test]
+fn deleting_a_label_leaves_its_container_standing() {
+    let mut doc = seed_doc();
+    doc.apply(Command::Delete {
+        ids: vec!["label".to_string()],
+    });
+    assert!(doc.index_of("rect").is_some(), "the cascade runs one way only");
+    let bound = get(&doc, "rect").bound_elements.as_ref().unwrap();
+    assert!(bound.iter().all(|b| b.id != "label"));
+}
+
+#[test]
+fn a_half_bound_label_loses_its_ghost_container_rather_than_its_life() {
+    // A text that names a container the container does not name back — the
+    // shape a hand-edited file arrives in. Deleting on the strength of one
+    // half of a reference would be deleting somebody else's text, so the
+    // reference goes and the text stays.
+    let mut doc = seed_doc();
+    doc.apply(Command::Patch {
+        id: "scribble".to_string(),
+        fields: [("containerId".to_string(), json!("ellipse"))].into_iter().collect(),
+    });
+    doc.apply(Command::Delete {
+        ids: vec!["ellipse".to_string()],
+    });
+    assert!(doc.index_of("scribble").is_some());
+    assert_eq!(get(&doc, "scribble").container_id, None);
+
+    doc.undo().unwrap();
+    assert_eq!(get(&doc, "scribble").container_id.as_deref(), Some("ellipse"));
+}
+
+#[test]
+fn bind_label_writes_both_halves_and_undo_takes_both_back() {
+    let mut doc = seed_doc();
+    doc.apply(Command::UnbindLabel {
+        text: "label".to_string(),
+    });
+    assert_eq!(get(&doc, "label").container_id, None);
+    assert!(get(&doc, "rect")
+        .bound_elements
+        .as_ref()
+        .is_some_and(|v| v.iter().all(|b| b.id != "label")));
+
+    doc.apply(Command::BindLabel {
+        container: "ellipse".to_string(),
+        text: "label".to_string(),
+    });
+    assert_eq!(get(&doc, "label").container_id.as_deref(), Some("ellipse"));
+    assert!(get(&doc, "ellipse")
+        .bound_elements
+        .as_ref()
+        .is_some_and(|v| v.iter().any(|b| b.id == "label" && b.kind == "text")));
+
+    doc.undo().unwrap();
+    assert_eq!(get(&doc, "label").container_id, None);
+    assert!(get(&doc, "ellipse")
+        .bound_elements
+        .as_ref()
+        .is_some_and(|v| v.iter().all(|b| b.id != "label")));
+    doc.undo().unwrap();
+    assert_eq!(get(&doc, "label").container_id.as_deref(), Some("rect"));
+}
+
+#[test]
+fn rebinding_a_label_detaches_it_from_the_container_it_left() {
+    let mut doc = seed_doc();
+    doc.apply(Command::BindLabel {
+        container: "ellipse".to_string(),
+        text: "label".to_string(),
+    });
+    // One label, one container: the old one must not keep a back-reference to
+    // a label it no longer holds.
+    assert!(get(&doc, "rect")
+        .bound_elements
+        .as_ref()
+        .is_some_and(|v| v.iter().all(|b| b.id != "label")));
+    assert!(get(&doc, "rect")
+        .bound_elements
+        .as_ref()
+        .is_some_and(|v| v.iter().any(|b| b.id == "arrow")));
+}
+
+#[test]
+fn a_label_may_only_go_where_excalidraw_would_put_one() {
+    let mut doc = seed_doc();
+    let before = doc.revision();
+    // Not a text...
+    doc.apply(Command::BindLabel {
+        container: "rect".to_string(),
+        text: "scribble".to_string(),
+    });
+    // ...and not into something that cannot hold one.
+    doc.apply(Command::BindLabel {
+        container: "scribble".to_string(),
+        text: "label".to_string(),
+    });
+    assert_eq!(doc.revision(), before, "neither is a binding Excalidraw would honour");
+    assert_eq!(get(&doc, "label").container_id.as_deref(), Some("rect"));
+}
+
+// ---------------------------------------------------------------------------
+// The files map
+// ---------------------------------------------------------------------------
+
+fn file_entry(url: &str) -> Value {
+    json!({ "mimeType": "image/png", "id": "f1", "dataURL": url, "created": 1_700_000_000_000i64 })
+}
+
+#[test]
+fn putting_a_file_is_undoable_and_re_puttable() {
+    let mut doc = seed_doc();
+    // The fixture arrives with one file already, which is the point: an insert
+    // must not disturb what was there.
+    let before = doc.scene().files.clone();
+
+    doc.apply(Command::PutFile {
+        id: "f1".to_string(),
+        entry: file_entry("data:image/png;base64,AAAA"),
+    });
+    assert_eq!(doc.scene().files["f1"]["dataURL"], json!("data:image/png;base64,AAAA"));
+
+    doc.undo().unwrap();
+    assert_eq!(doc.scene().files, before, "an image insert has to undo whole");
+    doc.redo().unwrap();
+    assert_eq!(doc.scene().files.len(), 2);
+}
+
+#[test]
+fn putting_the_same_bytes_twice_is_not_history() {
+    let mut doc = seed_doc();
+    doc.apply(Command::PutFile {
+        id: "f1".to_string(),
+        entry: file_entry("data:image/png;base64,AAAA"),
+    });
+    let revision = doc.revision();
+    // Excalidraw keys a file by a hash of its content, so the second drop of
+    // the same image writes the identical value.
+    doc.apply(Command::PutFile {
+        id: "f1".to_string(),
+        entry: file_entry("data:image/png;base64,AAAA"),
+    });
+    assert_eq!(doc.revision(), revision);
+}
+
+#[test]
+fn dropping_a_file_puts_it_back_in_its_own_place() {
+    let mut doc = seed_doc();
+    for id in ["a", "b", "c"] {
+        doc.apply(Command::PutFile {
+            id: id.to_string(),
+            entry: file_entry(id),
+        });
+    }
+    doc.apply(Command::DropFile { id: "b".to_string() });
+    assert_eq!(doc.scene().files.keys().collect::<Vec<_>>(), ["someFile", "a", "c"]);
+
+    doc.undo().unwrap();
+    // Order matters for the same reason element key order does: a file that
+    // comes back with its images shuffled is a diff nobody asked for.
+    assert_eq!(doc.scene().files.keys().collect::<Vec<_>>(), ["someFile", "a", "b", "c"]);
+}
+
+#[test]
+fn a_file_repaints_the_images_that_name_it_and_nothing_else() {
+    let mut doc = seed_doc();
+    doc.apply(Command::Patch {
+        id: "rect".to_string(),
+        fields: [("fileId".to_string(), json!("f1"))].into_iter().collect(),
+    });
+    let change = doc.apply(Command::PutFile {
+        id: "f1".to_string(),
+        entry: file_entry("data:image/png;base64,AAAA"),
+    });
+    let rect = doc.index_of("rect").unwrap() as u32;
+    assert_eq!(change.dirty, vec![rect]);
+}
+
+// ---------------------------------------------------------------------------
+// appState
+// ---------------------------------------------------------------------------
+
+#[test]
+fn setting_app_state_merges_and_undoes() {
+    let mut doc = seed_doc();
+    let before = doc.scene().app_state.clone();
+    assert!(before.contains_key("viewBackgroundColor"));
+
+    doc.apply(Command::SetAppState {
+        fields: [
+            ("viewBackgroundColor".to_string(), json!("#1e1e1e")),
+            ("theme".to_string(), json!("dark")),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    assert_eq!(doc.scene().app_state["viewBackgroundColor"], json!("#1e1e1e"));
+    assert_eq!(doc.scene().app_state["theme"], json!("dark"));
+
+    doc.undo().unwrap();
+    assert_eq!(doc.scene().app_state, before, "a key that was not there must go again");
+    doc.redo().unwrap();
+    assert_eq!(doc.scene().app_state["theme"], json!("dark"));
+}
+
+#[test]
+fn setting_app_state_leaves_every_other_key_alone() {
+    // The whole reason `appState` is a raw map: this crate decides nothing about
+    // its contents, including the nested subtrees it has never heard of.
+    let mut doc = seed_doc();
+    let untouched = doc.scene().app_state.get("nestedUnknown").cloned();
+    assert!(untouched.is_some(), "the fixture is meant to carry one");
+    doc.apply(Command::SetAppState {
+        fields: [("gridSize".to_string(), json!(20))].into_iter().collect(),
+    });
+    assert_eq!(doc.scene().app_state.get("nestedUnknown").cloned(), untouched);
+    assert_eq!(doc.scene().app_state["gridSize"], json!(20));
+}
+
+#[test]
+fn a_null_removes_an_app_state_key_and_undo_puts_it_back_in_place() {
+    let mut doc = seed_doc();
+    let order: Vec<String> = doc.scene().app_state.keys().cloned().collect();
+    assert!(order.len() > 1, "the fixture needs more than one key to have an order");
+
+    doc.apply(Command::SetAppState {
+        fields: [(order[0].clone(), Value::Null)].into_iter().collect(),
+    });
+    assert!(!doc.scene().app_state.contains_key(&order[0]));
+
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.scene().app_state.keys().cloned().collect::<Vec<_>>(),
+        order,
+        "a restored key must come back where it was, not on the end"
+    );
+}
+
+#[test]
+fn writing_the_app_state_it_already_has_is_not_history() {
+    let mut doc = seed_doc();
+    let colour = doc.scene().app_state["viewBackgroundColor"].clone();
+    let revision = doc.revision();
+    doc.apply(Command::SetAppState {
+        fields: [("viewBackgroundColor".to_string(), colour)].into_iter().collect(),
+    });
+    assert_eq!(doc.revision(), revision);
+}
+
+#[test]
+fn an_app_state_change_asks_for_a_full_repaint() {
+    // No element changed and every element may look different — the theme
+    // inverts every colour, the background sits behind all of them.
+    let mut doc = seed_doc();
+    let change = doc.apply(Command::SetAppState {
+        fields: [("theme".to_string(), json!("dark"))].into_iter().collect(),
+    });
+    assert!(change.structural);
+}
+
+// ---------------------------------------------------------------------------
+// Reseeding
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reseed_is_the_one_thing_that_may_rewrite_a_seed() {
+    let mut doc = seed_doc();
+    let before = get(&doc, "rect").seed;
+    doc.apply(Command::Reseed {
+        ids: vec!["rect".to_string()],
+    });
+    let after = get(&doc, "rect").seed;
+    assert_ne!(after, before, "a sloppiness change asks for a different sketch");
+    // Every other element is untouched: a re-sketch is not a document-wide
+    // event.
+    assert_eq!(get(&doc, "ellipse").seed, 333333);
+
+    doc.undo().unwrap();
+    assert_eq!(get(&doc, "rect").seed, before, "undo restores the sketch that was there");
+}
+
+#[test]
+fn a_reseed_still_refuses_a_patch_carrying_a_seed() {
+    // The two live side by side: the command is a user asking, a patch key is
+    // a caller forgetting.
+    let mut doc = seed_doc();
+    doc.apply(Command::Patch {
+        id: "rect".to_string(),
+        fields: [("seed".to_string(), json!(42))].into_iter().collect(),
+    });
+    assert_eq!(get(&doc, "rect").seed, 111111);
+}
+
+// ---------------------------------------------------------------------------
 // Coalescing — one drag, one undo
 // ---------------------------------------------------------------------------
 
@@ -914,6 +1234,67 @@ fn a_new_edit_forfeits_the_redo_branch() {
     assert!(!doc.can_redo());
 }
 
+#[test]
+fn one_element_written_twice_in_one_entry_still_undoes_to_the_start() {
+    let mut doc = seed_doc();
+    let before = (get(&doc, "rect").x, get(&doc, "rect").y);
+    // A command that writes the same element twice, then a second command
+    // folded into the same entry. Two records for one element inside one entry
+    // used to disagree with each other: undo replays an entry backwards and so
+    // ends on the earliest record, redo replays it forwards and ends on the
+    // latest, and the fold wrote the incoming before-state into whichever came
+    // first. The result was an undo that restored a value from the middle of
+    // the gesture.
+    doc.apply_keyed(
+        Command::Batch(vec![
+            Command::patch1("rect", "x", json!(500.0)),
+            Command::patch1("rect", "y", json!(600.0)),
+            Command::patch1("rect", "x", json!(700.0)),
+        ]),
+        "gesture",
+        1_000,
+    );
+    doc.apply_keyed(Command::patch1("rect", "x", json!(900.0)), "gesture", 1_008);
+    assert_eq!(get(&doc, "rect").x, 900.0);
+
+    doc.undo().unwrap();
+    assert_eq!((get(&doc, "rect").x, get(&doc, "rect").y), before);
+    doc.redo().unwrap();
+    assert_eq!((get(&doc, "rect").x, get(&doc, "rect").y), (900.0, 600.0));
+}
+
+#[test]
+fn an_arrow_bound_to_itself_still_gives_its_back_reference_back() {
+    // The degenerate case that reaches the same path through `Bind`: the
+    // command writes the arrow's own `endBinding` and then its own
+    // `boundElements`, so one command emits two writes for one element.
+    let mut doc = seed_doc();
+    assert!(get(&doc, "arrow").bound_elements.is_none());
+    doc.apply_keyed(
+        Command::Bind {
+            arrow: "arrow".to_string(),
+            end: End::End,
+            binding: Some(binding_to("arrow")),
+        },
+        "gesture",
+        1_000,
+    );
+    doc.apply_keyed(
+        Command::Bind {
+            arrow: "arrow".to_string(),
+            end: End::End,
+            binding: None,
+        },
+        "gesture",
+        1_008,
+    );
+    undo_all(&mut doc);
+    assert!(
+        get(&doc, "arrow").bound_elements.is_none(),
+        "an element that never had the key must not gain it across an undo"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The fuzz
 // ---------------------------------------------------------------------------
@@ -932,7 +1313,7 @@ fn random_command(doc: &mut Doc, rng: &mut Rng) -> Option<Command> {
     }
     let pick = |rng: &mut Rng, v: &[String]| v[(rng.next_u64() % v.len() as u64) as usize].clone();
 
-    Some(match rng.next_u64() % 10 {
+    Some(match rng.next_u64() % 12 {
         0..=2 => {
             // A patch, weighted heavily because that is what an editor does.
             let id = pick(rng, &live);
@@ -1045,6 +1426,61 @@ fn random_command(doc: &mut Doc, rng: &mut Rng) -> Option<Command> {
                 })
             };
             Command::Bind { arrow, end, binding }
+        }
+        9 if rng.next_u64().is_multiple_of(2) => {
+            // appState: not an element either, and the only command whose keys
+            // are a map the crate deliberately knows nothing about.
+            let key = ["theme", "gridSize", "viewBackgroundColor", "nestedUnknown"]
+                [(rng.next_u64() % 4) as usize]
+                .to_string();
+            let value = if rng.next_u64().is_multiple_of(4) {
+                Value::Null
+            } else {
+                json!(rng.next_u64() % 1000)
+            };
+            Command::SetAppState { fields: [(key, value)].into_iter().collect() }
+        }
+        9 => {
+            // The files map. Not an element, so it exercises the one `Edit`
+            // variant nothing else here reaches — including the key order a
+            // removal has to put back.
+            let id = format!("f{}", rng.next_u64() % 3);
+            if rng.next_u64().is_multiple_of(3) {
+                Command::DropFile { id }
+            } else {
+                Command::PutFile {
+                    id,
+                    entry: json!({ "mimeType": "image/png", "n": rng.next_u64() % 100 }),
+                }
+            }
+        }
+        10 => {
+            // Labels: `containerId` on the text and a back-reference on the
+            // container, which have to move together in both directions.
+            let texts: Vec<String> = doc
+                .elements()
+                .iter()
+                .filter(|e| e.kind == ElementKind::Text)
+                .map(|e| e.id.clone())
+                .collect();
+            if texts.is_empty() {
+                return None;
+            }
+            let text = pick(rng, &texts);
+            if rng.next_u64().is_multiple_of(3) {
+                Command::UnbindLabel { text }
+            } else {
+                let containers: Vec<String> = doc
+                    .elements()
+                    .iter()
+                    .filter(|e| e.kind.is_label_container())
+                    .map(|e| e.id.clone())
+                    .collect();
+                if containers.is_empty() {
+                    return None;
+                }
+                Command::BindLabel { container: pick(rng, &containers), text }
+            }
         }
         _ => {
             // A batch, which is how a multi-selection drag arrives.
@@ -1202,3 +1638,4 @@ fn fuzz_never_rewrites_a_seed() {
         }
     }
 }
+

@@ -185,6 +185,34 @@ impl ElementKind {
         self.is_linear() || matches!(self, ElementKind::Freedraw)
     }
 
+    /// True for the element type that may carry `startBinding`/`endBinding`:
+    /// an arrow, and only an arrow.
+    ///
+    /// This is Excalidraw's `isBindingElement`, and it is deliberately *not*
+    /// [`ElementKind::is_linear`]. `is_linear` answers a geometry question —
+    /// "is this element's shape a point list" — and borrowing it as the
+    /// binding predicate is how plain lines came to be written with bindings
+    /// excalidraw.com then ignores: the file re-routes here and is inert
+    /// there. The two questions coincide for arrows and differ for lines, so
+    /// they get two names.
+    pub fn is_binding_element(&self) -> bool {
+        matches!(self, ElementKind::Arrow)
+    }
+
+    /// True for the shapes Excalidraw will put a text label inside — its
+    /// `isTextBindableContainer`, which is the three closed shapes plus the
+    /// arrow (an arrow label rides on the arrow's midpoint).
+    ///
+    /// Deliberately narrower than "anything with a box": a `frame` carries a
+    /// *name*, not a bound label, and a label written into one is a
+    /// `containerId` excalidraw.com will not honour.
+    pub fn is_label_container(&self) -> bool {
+        matches!(
+            self,
+            ElementKind::Rectangle | ElementKind::Diamond | ElementKind::Ellipse | ElementKind::Arrow
+        )
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             ElementKind::Rectangle => "rectangle",

@@ -471,17 +471,29 @@ fn hit_points(e: &Element, b: &Bounds, x: f64, y: f64, t: f64) -> bool {
     false
 }
 
+/// True when an element is there to be picked up: not a tombstone, not locked.
+///
+/// Locked belongs here rather than in the caller because "locked" in Excalidraw
+/// means *transparent to the pointer*, not merely unselectable. Filtering the
+/// answer afterwards stops the element being selected and still lets it swallow
+/// the click, so a locked background photo becomes an unclickable hole over
+/// everything behind it — which is the opposite of what locking it was for.
+fn is_pickable(e: &Element) -> bool {
+    !e.is_deleted && e.locked != Some(true)
+}
+
 /// Topmost element under the point (last in z-order wins), by index.
 ///
 /// Deleted elements are skipped: Excalidraw keeps them in the file for undo and
 /// for merging another client's edits, and they are not drawn — clicking one
-/// would be clicking something invisible.
+/// would be clicking something invisible. Locked ones are skipped too; see
+/// [`is_pickable`].
 pub fn hit_test_scene(elements: &[Element], x: f64, y: f64, threshold: f64) -> Option<usize> {
     elements
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, e)| !e.is_deleted && hit_test(e, x, y, threshold))
+        .find(|(_, e)| is_pickable(e) && hit_test(e, x, y, threshold))
         .map(|(i, _)| i)
 }
 
@@ -495,7 +507,7 @@ pub fn hit_test_scene(elements: &[Element], x: f64, y: f64, threshold: f64) -> O
 pub fn marquee_hits(elements: &[Element], area: &Bounds, contain: bool) -> Vec<usize> {
     let mut out = Vec::new();
     for (i, e) in elements.iter().enumerate() {
-        if e.is_deleted {
+        if !is_pickable(e) {
             continue;
         }
         if let Some(b) = element_bounds_rotated(e) {
@@ -718,6 +730,136 @@ pub fn handle_at(
     found
 }
 
+// --- per-point handles ------------------------------------------------------
+//
+// A second, parallel handle model, and parallel on purpose. The nine
+// [`Handle`]s describe a *box*; an arrow's endpoint is not on its box — it is
+// one entry of its `points` — so there is no discriminant to add. Extending
+// the enum would also renumber a set of integers the WASM boundary and
+// `xdWasm.js` both hard-code (see [`Handle`]), for a handle that is not one of
+// the nine anyway. So: separate functions, same shape of answer.
+
+/// The grab points on a linear or freedraw element's own geometry: every entry
+/// of `points`, in absolute scene coordinates, rotated by the element's angle
+/// so the handles sit on the stroke as drawn rather than on the unrotated
+/// point list.
+///
+/// Empty for anything whose shape is a box — a rectangle has no points to
+/// grab, and returning its corners here would give the caller two competing
+/// answers for the same pixel.
+pub fn point_handles(e: &Element) -> Vec<(f64, f64)> {
+    let Some(points) = e.points.as_ref().filter(|_| e.kind.has_points()) else {
+        return Vec::new();
+    };
+    let (cx, cy) = element_center(e);
+    let angle = num(e.angle, 0.0);
+    points
+        .iter()
+        .map(|p| {
+            let (x, y) = (num(e.x, 0.0) + p[0], num(e.y, 0.0) + p[1]);
+            rotate_point(x, y, cx, cy, angle)
+        })
+        .collect()
+}
+
+/// The midpoint of every segment between consecutive points, in the same frame
+/// as [`point_handles`]. These are the "add a point here" targets Excalidraw
+/// shows on a selected line; a two-point arrow has exactly one.
+pub fn segment_midpoints(e: &Element) -> Vec<(f64, f64)> {
+    let pts = point_handles(e);
+    pts.windows(2).map(|w| ((w[0].0 + w[1].0) / 2.0, (w[0].1 + w[1].1) / 2.0)).collect()
+}
+
+/// The index of the point within `radius` of `(x, y)`, nearest first, or
+/// `None`.
+///
+/// The last point is tested before the first so that a closed shape — a
+/// polygon whose ends coincide — hands the caller the end it can drag onward
+/// rather than the one it would drag backwards.
+pub fn point_handle_at(e: &Element, x: f64, y: f64, radius: f64) -> Option<usize> {
+    nearest_within(&point_handles(e), x, y, radius)
+}
+
+/// The index of the *segment* whose midpoint is within `radius` of `(x, y)` —
+/// segment `i` runs from point `i` to point `i + 1`.
+pub fn segment_midpoint_at(e: &Element, x: f64, y: f64, radius: f64) -> Option<usize> {
+    nearest_within(&segment_midpoints(e), x, y, radius)
+}
+
+fn nearest_within(pts: &[(f64, f64)], x: f64, y: f64, radius: f64) -> Option<usize> {
+    let r2 = radius * radius;
+    let mut best = f64::INFINITY;
+    let mut found = None;
+    for (i, p) in pts.iter().enumerate().rev() {
+        let d = (x - p.0).powi(2) + (y - p.1).powi(2);
+        if d <= r2 && d < best {
+            best = d;
+            found = Some(i);
+        }
+    }
+    found
+}
+
+// --- container-bound labels -------------------------------------------------
+
+/// The padding Excalidraw leaves between a container's edge and the label
+/// inside it (`BOUND_TEXT_PADDING`). Containers apply it twice — once per side
+/// — and arrows eight times, because an arrow label floats free of an outline
+/// and needs the room.
+pub const BOUND_TEXT_PADDING: f64 = 5.0;
+
+/// The width a label bound to this container has to wrap inside.
+///
+/// The per-kind formulas are Excalidraw's own: a rectangle gives up its
+/// padding on both sides, an ellipse the largest inscribed rectangle
+/// (`w/2 · √2`), a diamond half its width, and an arrow a fixed fraction of
+/// its length. Measurement itself stays in JS — only `ctx.measureText` knows
+/// how wide a string is — so this returns the *budget* and the caller returns
+/// the wrapped text.
+pub fn label_budget(container: &Element) -> f64 {
+    let w = num(container.width, 0.0).abs();
+    let pad = BOUND_TEXT_PADDING * 2.0;
+    let budget = match container.kind {
+        ElementKind::Ellipse => w / 2.0 * std::f64::consts::SQRT_2 - pad,
+        ElementKind::Diamond => (w / 2.0).round() - pad,
+        // `ARROW_LABEL_WIDTH_FRACTION`, and the padding an arrow label gets.
+        ElementKind::Arrow => w * 0.7 - BOUND_TEXT_PADDING * 8.0,
+        _ => w - pad,
+    };
+    budget.max(0.0)
+}
+
+/// Where a label sits inside its container: the box it should occupy, keeping
+/// its own measured `width`/`height` and honouring its `verticalAlign`.
+///
+/// Horizontally a bound label is always centred — Excalidraw centres the *box*
+/// and lets `textAlign` place the glyphs inside it — so this is the one
+/// position a container's move, resize or rotation has to put the label back
+/// at. It deliberately does not touch the label's size: that is a measurement,
+/// and this crate has no font metrics.
+pub fn label_position(container: &Element, label: &Element) -> (f64, f64) {
+    let cw = num(container.width, 0.0);
+    let ch = num(container.height, 0.0);
+    let lw = num(label.width, 0.0);
+    let lh = num(label.height, 0.0);
+    let x = num(container.x, 0.0) + (cw - lw) / 2.0;
+    let y = num(container.y, 0.0)
+        + match label.vertical_align.as_deref() {
+            Some("top") => BOUND_TEXT_PADDING,
+            Some("bottom") => ch - lh - BOUND_TEXT_PADDING,
+            // Excalidraw's default for bound text, and the only one that keeps
+            // a label centred while the container grows in both directions.
+            _ => (ch - lh) / 2.0,
+        };
+    (x, y)
+}
+
+/// The bearing from `(cx, cy)` to `(px, py)`, measured clockwise from straight
+/// up in a y-down coordinate system — the same convention element angles use.
+pub fn bearing(cx: f64, cy: f64, px: f64, py: f64) -> f64 {
+    (px - cx).atan2(cy - py)
+}
+
 /// The new box when `handle` is dragged to `(px, py)`.
 ///
 /// The box is axis-aligned but drawn rotated by `angle`, so the drag is done in
@@ -871,7 +1013,7 @@ fn span(a: f64, extent: f64, dir: i32, from_center: bool) -> (f64, f64) {
 /// clockwise, in a y-down coordinate system.
 pub fn rotation_angle(b: &Bounds, px: f64, py: f64, snap: f64) -> f64 {
     let (cx, cy) = b.center();
-    let mut a = (px - cx).atan2(cy - py);
+    let mut a = bearing(cx, cy, px, py);
     if snap > 0.0 {
         a = (a / snap).round() * snap;
     }

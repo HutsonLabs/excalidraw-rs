@@ -99,6 +99,23 @@ export class XdDoc {
         wasm.__wbg_xddoc_free(ptr, 0);
     }
     /**
+     * Line the selection up on one edge of its own box: `"left"`, `"centerH"`,
+     * `"right"`, `"top"`, `"centerV"`, `"bottom"`. Needs two elements.
+     *
+     * Strings here, rather than the integer `reorder` takes, because these
+     * arrive from a panel button whose own vocabulary is already these words —
+     * an integer would put a translation table between the click and the model
+     * for no gain on a path that runs once per press.
+     * @param {string} edge
+     * @returns {Change}
+     */
+    align(edge) {
+        const ptr0 = passStringToWasm0(edge, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_align(this.__wbg_ptr, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
      * @returns {any}
      */
     appState() {
@@ -120,6 +137,26 @@ export class XdDoc {
         const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.xddoc_beginDraft(this.__wbg_ptr, ptr0, len0, x, y, addHeapObject(style));
+        return Change.__wrap(ret);
+    }
+    /**
+     * Put a text element inside a container as its label, maintaining both
+     * halves: `containerId` on the text and a `{id, type:"text"}` entry in the
+     * container's `boundElements`.
+     *
+     * Separate from `bind`, which is arrow-endpoint-shaped. Refused unless the
+     * text really is a text and the container is one of Excalidraw's
+     * text-bindable shapes — rectangle, diamond, ellipse or arrow.
+     * @param {string} container
+     * @param {string} text
+     * @returns {Change}
+     */
+    bindLabel(container, text) {
+        const ptr0 = passStringToWasm0(container, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(text, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_bindLabel(this.__wbg_ptr, ptr0, len0, ptr1, len1);
         return Change.__wrap(ret);
     }
     /**
@@ -197,6 +234,18 @@ export class XdDoc {
         return Change.__wrap(ret);
     }
     /**
+     * Space the selection evenly, `"horizontal"` or `"vertical"`, leaving the
+     * outermost two where they are. Needs three elements.
+     * @param {string} axis
+     * @returns {Change}
+     */
+    distribute(axis) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_distribute(this.__wbg_ptr, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
      * Add a point to a freehand draft. Pressure is what the device reported,
      * or 0.5 when it reports nothing.
      * @param {number} x
@@ -231,6 +280,17 @@ export class XdDoc {
         const ptr0 = passStringToWasm0(key, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.xddoc_dragBy(this.__wbg_ptr, dx, dy, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
+     * Take an entry out of the `files` map.
+     * @param {string} id
+     * @returns {Change}
+     */
+    dropFile(id) {
+        const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_dropFile(this.__wbg_ptr, ptr0, len0);
         return Change.__wrap(ret);
     }
     /**
@@ -349,6 +409,18 @@ export class XdDoc {
         }
     }
     /**
+     * Mirror the selection about the centre line of its own box,
+     * `"horizontal"` or `"vertical"`. One element flips in place.
+     * @param {string} axis
+     * @returns {Change}
+     */
+    flip(axis) {
+        const ptr0 = passStringToWasm0(axis, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_flip(this.__wbg_ptr, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
      * @returns {Change}
      */
     group() {
@@ -408,15 +480,46 @@ export class XdDoc {
         return ret;
     }
     /**
-     * Insert a finished element from a plain JS object — the path text and
-     * paste take, where the shape is known before it exists.
-     * @param {any} element
+     * Add a point to the selected linear element, in the middle of segment
+     * `index` — clicking a midpoint handle.
+     *
+     * `index` is a **segment** index, exactly as `midpointHandleAt` returns it:
+     * segment `i` runs from point `i` to point `i + 1`, and the new point lands
+     * between them. Acts on `selection[0]`, for the same reason `movePoint`
+     * does.
+     *
+     * `key` is optional and folds the insert into a surrounding gesture's undo
+     * entry — pass the drag's key when a click-and-drag adds a point and then
+     * moves it, so the two are one press of ⌘Z.
+     * @param {number} index
+     * @param {number} x
+     * @param {number} y
+     * @param {string | null} [key]
      * @returns {Change}
      */
-    insert(element) {
+    insertPoint(index, x, y, key) {
+        var ptr0 = isLikeNone(key) ? 0 : passStringToWasm0(key, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_insertPoint(this.__wbg_ptr, index, x, y, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
+     * Insert a finished element from a plain JS object — the path text and
+     * paste take, where the shape is known before it exists.
+     *
+     * `at` is the z-order index to land on; leave it off (or pass a negative
+     * number) for "on top", which is where a drawing gesture puts a new shape.
+     * Naming one is what "paste in place" and "paste behind" need — the
+     * fractional index is keyed from where the element actually lands, so an
+     * insert lower down is correctly ordered for excalidraw.com too.
+     * @param {any} element
+     * @param {number | null} [at]
+     * @returns {Change}
+     */
+    insert(element, at) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.xddoc_insert(retptr, this.__wbg_ptr, addHeapObject(element));
+            wasm.xddoc_insert(retptr, this.__wbg_ptr, addHeapObject(element), isLikeNone(at) ? Number.MAX_SAFE_INTEGER : (at) >> 0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -441,6 +544,30 @@ export class XdDoc {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.xddoc_isBound(this.__wbg_ptr, ptr0, len0, at_end);
         return ret !== 0;
+    }
+    /**
+     * The width a label bound to this container has to wrap inside.
+     *
+     * The split this export exists for: only JS can measure a string, and only
+     * the model knows the container's per-kind budget. Rust says how much room
+     * there is; JS wraps to it and patches the label's `text`, `width` and
+     * `height`.
+     * @param {number} index
+     * @returns {number}
+     */
+    labelBudget(index) {
+        const ret = wasm.xddoc_labelBudget(this.__wbg_ptr, index);
+        return ret;
+    }
+    /**
+     * The index of the label inside this element, or -1 — how the editor finds
+     * an existing label to reopen instead of stacking a second one on top.
+     * @param {number} index
+     * @returns {number}
+     */
+    labelOf(index) {
+        const ret = wasm.xddoc_labelOf(this.__wbg_ptr, index);
+        return ret;
     }
     /**
      * @returns {number}
@@ -471,6 +598,62 @@ export class XdDoc {
         }
     }
     /**
+     * The index of the *segment* whose midpoint is within `radius` of
+     * `(x, y)`, or -1. Segment `i` runs from point `i` to point `i + 1`.
+     * @param {number} x
+     * @param {number} y
+     * @param {number} radius
+     * @returns {number}
+     */
+    midpointHandleAt(x, y, radius) {
+        const ret = wasm.xddoc_midpointHandleAt(this.__wbg_ptr, x, y, radius);
+        return ret;
+    }
+    /**
+     * The midpoint of each segment of the selected element, same shape as
+     * `pointHandles`. Excalidraw shows these as the "add a point here" targets.
+     * @returns {Float64Array | undefined}
+     */
+    midpointHandles() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.xddoc_midpointHandles(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            let v1;
+            if (r0 !== 0) {
+                v1 = getArrayF64FromWasm0(r0, r1).slice();
+                wasm.__wbindgen_export4(r0, r1 * 8, 8);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Drag one point of the selected linear element to `(x, y)`, keyed so the
+     * whole drag is one undo entry.
+     *
+     * Acts on `selection[0]`: the per-point handles are a single-element
+     * affordance (`pointHandles` returns nothing for a multi-selection), so the
+     * element to edit is the selected one and there is no id to pass.
+     *
+     * Dragging a bound endpoint away from its shape unbinds it, which is what
+     * makes the endpoint movable at all — see [`ops::move_point`]. Call
+     * `rebindEnd` on pointer-up to attach it to whatever it was dropped on.
+     * @param {number} index
+     * @param {number} x
+     * @param {number} y
+     * @param {string} key
+     * @returns {Change}
+     */
+    movePoint(index, x, y, key) {
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_movePoint(this.__wbg_ptr, index, x, y, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
      * Parse a `.excalidraw` file. Throws the parse error as a string fit to
      * show in the pane — a half-written file mid-save is a normal thing to
      * open, not a crash.
@@ -497,15 +680,93 @@ export class XdDoc {
     /**
      * Patch one element by id — the escape hatch the text overlay uses when
      * it has measured a label and knows its real width.
+     *
+     * `key` is the coalesce key, as on `dragBy`: leave it off and the patch is
+     * its own undo entry, pass one and every patch under it folds into a single
+     * entry. That is what a sweep needs — an eraser crossing forty shapes is
+     * one press of ⌘Z, not forty — and there is no other way to express it,
+     * since each element needs its own `Patch`.
      * @param {string} id
      * @param {any} fields
+     * @param {string | null} [key]
      * @returns {Change}
      */
-    patch(id, fields) {
+    patch(id, fields, key) {
         const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.xddoc_patch(this.__wbg_ptr, ptr0, len0, addHeapObject(fields));
+        var ptr1 = isLikeNone(key) ? 0 : passStringToWasm0(key, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_patch(this.__wbg_ptr, ptr0, len0, addHeapObject(fields), ptr1, len1);
         return Change.__wrap(ret);
+    }
+    /**
+     * The index of the point within `radius` of `(x, y)`, or -1. `radius` is in
+     * scene units, like `handleAt`'s.
+     * @param {number} x
+     * @param {number} y
+     * @param {number} radius
+     * @returns {number}
+     */
+    pointHandleAt(x, y, radius) {
+        const ret = wasm.xddoc_pointHandleAt(this.__wbg_ptr, x, y, radius);
+        return ret;
+    }
+    /**
+     * The selected element's own points as `[x0, y0, x1, y1, …]`, or
+     * `undefined` when the selection is not exactly one element with a point
+     * list.
+     *
+     * These are the grips an arrow's endpoints are dragged by — the gesture the
+     * nine box handles cannot express, because an endpoint is not on the box.
+     * A caller that finds a point handle here must prefer it over
+     * `handleAt`: on a diagonal arrow the endpoints land on the box's corner
+     * handles, and the endpoint has to win or it is ungrabbable.
+     * @returns {Float64Array | undefined}
+     */
+    pointHandles() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.xddoc_pointHandles(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            let v1;
+            if (r0 !== 0) {
+                v1 = getArrayF64FromWasm0(r0, r1).slice();
+                wasm.__wbindgen_export4(r0, r1 * 8, 8);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Put an entry in the `files` map — the bytes an image element's `fileId`
+     * names — as one undoable act.
+     *
+     * Excalidraw keys these by a hash of the content, so re-adding the same
+     * image writes the same value and the command sees no change at all.
+     * Nothing here inspects the entry: it is `{mimeType, id, dataURL, created}`
+     * as far as the caller is concerned and raw JSON as far as this crate is.
+     * @param {string} id
+     * @param {any} entry
+     * @returns {Change}
+     */
+    putFile(id, entry) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.xddoc_putFile(retptr, this.__wbg_ptr, ptr0, len0, addHeapObject(entry));
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return Change.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Bind one end of an arrow to whatever is under it, or clear the binding
@@ -537,6 +798,15 @@ export class XdDoc {
         return Change.__wrap(ret);
     }
     /**
+     * Re-roll the selection's seeds and change nothing else — a fresh sketch
+     * of the same shapes.
+     * @returns {Change}
+     */
+    reseed() {
+        const ret = wasm.xddoc_reseed(this.__wbg_ptr);
+        return Change.__wrap(ret);
+    }
+    /**
      * @param {number} handle
      * @param {number} px
      * @param {number} py
@@ -559,6 +829,12 @@ export class XdDoc {
         return ret;
     }
     /**
+     * Turn the selection so its rotate handle follows `(px, py)`.
+     *
+     * The first call under a given `key` captures the frame the gesture starts
+     * in and every later call is a delta against it — see
+     * [`ops::RotateAnchor`]. An empty key is a one-shot rotation and captures
+     * afresh each time.
      * @param {number} px
      * @param {number} py
      * @param {number} snap
@@ -590,6 +866,12 @@ export class XdDoc {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }
     }
+    /**
+     * Select everything a gesture could have selected — which excludes locked
+     * elements, as Excalidraw's own select-all does. A ⌘A that pulled a locked
+     * element in would make the next drag move the one thing the user said not
+     * to move.
+     */
     selectAll() {
         wasm.xddoc_selectAll(this.__wbg_ptr);
     }
@@ -626,6 +908,33 @@ export class XdDoc {
         }
     }
     /**
+     * The axis-aligned box that *contains* the selection, `[minX, minY, maxX,
+     * maxY]`.
+     *
+     * Not the same question as `selectionBounds`, which answers "what box do
+     * the handles belong on" and gives a single rotated element its own
+     * unrotated box. This one is the union of the rotated boxes — where the
+     * selection actually is on the canvas — which is what zoom-to-selection
+     * and scroll-back-to-content need.
+     * @returns {Float64Array | undefined}
+     */
+    selectionExtent() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.xddoc_selectionExtent(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            let v1;
+            if (r0 !== 0) {
+                v1 = getArrayF64FromWasm0(r0, r1).slice();
+                wasm.__wbindgen_export4(r0, r1 * 8, 8);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * @returns {Uint32Array}
      */
     get selection() {
@@ -642,6 +951,21 @@ export class XdDoc {
         }
     }
     /**
+     * Merge keys into the scene's `appState` — the canvas background, the
+     * theme, the grid size — as one undoable act.
+     *
+     * A shallow merge, and a `null` value removes a key. `appState` is held as
+     * raw JSON on purpose (nothing in the core decides anything about it), and
+     * this keeps that: keys it has never heard of pass straight through and
+     * keys it is not given are left exactly as they were.
+     * @param {any} fields
+     * @returns {Change}
+     */
+    setAppState(fields) {
+        const ret = wasm.xddoc_setAppState(this.__wbg_ptr, addHeapObject(fields));
+        return Change.__wrap(ret);
+    }
+    /**
      * The host owns the clock: this crate compiles to wasm and must stay
      * deterministic under test, so there is no `SystemTime` anywhere in it.
      * @param {number} ms
@@ -656,6 +980,22 @@ export class XdDoc {
         const ptr0 = passArray32ToWasm0(indices, wasm.__wbindgen_export);
         const len0 = WASM_VECTOR_LEN;
         wasm.xddoc_setSelection(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * A style patch that also re-rolls the seed of everything it touches, as
+     * one undo entry — what a sloppiness change is.
+     *
+     * Excalidraw draws a *different sketch* on every sloppiness click. Scaling
+     * the same random draws by a larger roughness instead reads as the stroke
+     * getting bolder rather than as a different hand, which is the reported
+     * "smooth to bold". The two writes have to be one entry: undo landing
+     * between them would leave the new roughness on the old seed.
+     * @param {any} style
+     * @returns {Change}
+     */
+    setStyleResketched(style) {
+        const ret = wasm.xddoc_setStyleResketched(this.__wbg_ptr, addHeapObject(style));
+        return Change.__wrap(ret);
     }
     /**
      * @param {any} style
@@ -691,6 +1031,18 @@ export class XdDoc {
         wasm.xddoc_toggleSelection(this.__wbg_ptr, index);
     }
     /**
+     * Take a label out of its container, both halves. The text stays in the
+     * scene, free-floating.
+     * @param {string} text
+     * @returns {Change}
+     */
+    unbindLabel(text) {
+        const ptr0 = passStringToWasm0(text, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xddoc_unbindLabel(this.__wbg_ptr, ptr0, len0);
+        return Change.__wrap(ret);
+    }
+    /**
      * @returns {Change | undefined}
      */
     undo() {
@@ -712,6 +1064,13 @@ function __wbg_get_imports() {
         __wbg_Error_67e7344beaa85059: function(arg0, arg1) {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return addHeapObject(ret);
+        },
+        __wbg_String_8564e559799eccda: function(arg0, arg1) {
+            const ret = String(getObject(arg1));
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
         __wbg___wbindgen_bigint_get_as_i64_b482365c149396c8: function(arg0, arg1) {
             const v = getObject(arg1);

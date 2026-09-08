@@ -135,6 +135,25 @@ enum Edit {
     /// order rather than a move-list costs a few hundred bytes and removes an
     /// entire category of off-by-one.
     Reordered { prev: Vec<String>, next: Vec<String> },
+    /// Keys written into the scene's `appState`, with what was there before.
+    /// Same `None`-means-absent convention as [`KeyEdit`].
+    AppStateWritten {
+        prev: Vec<KeyEdit>,
+        next: Vec<KeyEdit>,
+        /// The key order before a removal — see [`Edit::Patched::rest_order`].
+        order: Option<Vec<String>>,
+    },
+    /// One entry of the scene's `files` map, with whatever was there before.
+    /// `None` on either side means the key did not exist, exactly as in
+    /// [`KeyEdit`].
+    FileWritten {
+        id: String,
+        prev: Option<Value>,
+        next: Option<Value>,
+        /// The key order of `files` before a removal, recorded for the same
+        /// reason [`Edit::Patched::rest_order`] is — see there.
+        order: Option<Vec<String>>,
+    },
 }
 
 /// One press of undo.
@@ -225,25 +244,42 @@ fn sanitise(fields: &Map<String, Value>) -> Vec<KeyEdit> {
         .collect()
 }
 
+/// An `appState` patch as a key-edit list. Nothing is filtered — unlike an
+/// element patch, which refuses `seed` and `id`, there is no key here whose
+/// meaning this crate knows well enough to protect.
+fn sanitise_app_state(fields: &Map<String, Value>) -> Vec<KeyEdit> {
+    fields
+        .iter()
+        .map(|(k, v)| (k.clone(), if v.is_null() { None } else { Some(v.clone()) }))
+        .collect()
+}
+
 /// Put `rest` back in the order it was in, for the keys that are still there.
 /// Anything the recorded order does not name keeps its relative position on
 /// the end. See [`Edit::Patched::rest_order`].
 fn restore_rest_order(e: &mut Element, order: &[String]) {
-    if e.rest.len() < 2 {
+    restore_key_order(&mut e.rest, order);
+}
+
+/// Put a JSON object's keys back in the order they were in, for the keys that
+/// are still there. Anything the recorded order does not name keeps its
+/// relative position on the end.
+fn restore_key_order(map: &mut Map<String, Value>, order: &[String]) {
+    if map.len() < 2 {
         return;
     }
-    let mut out = Map::with_capacity(e.rest.len());
+    let mut out = Map::with_capacity(map.len());
     for key in order {
-        if let Some(v) = e.rest.get(key) {
+        if let Some(v) = map.get(key) {
             out.insert(key.clone(), v.clone());
         }
     }
-    for (key, v) in e.rest.iter() {
+    for (key, v) in map.iter() {
         if !out.contains_key(key) {
             out.insert(key.clone(), v.clone());
         }
     }
-    e.rest = out;
+    *map = out;
 }
 
 /// A JSON array of strings, without going through `serde_json::to_value` and
@@ -384,6 +420,17 @@ impl Doc {
     /// duplication both come through here; nothing else has cause to.
     pub fn fresh_identity(&mut self) -> (String, i64) {
         (self.rng.next_id(), self.rng.next_nonce())
+    }
+
+    /// A fresh id for something that is not an element — a group.
+    ///
+    /// [`Command::Group`] mints its own from the same stream; duplication
+    /// needs one from the outside, because a copied group has to become a
+    /// *new* group and only the caller knows which ids belong to it.
+    ///
+    /// [`Command::Group`]: crate::command::Command::Group
+    pub fn fresh_id(&mut self) -> String {
+        self.rng.next_id()
     }
 
     /// The host supplies the entropy, for the same reason it supplies the
@@ -544,6 +591,30 @@ impl Doc {
                 self.set_order(order);
                 acc.structural = true;
             }
+            Edit::AppStateWritten { prev, next, order } => {
+                let (keys, order) = if forward {
+                    (next, None)
+                } else {
+                    (prev, order.as_deref())
+                };
+                self.write_app_state_raw(keys, order, acc);
+            }
+            Edit::FileWritten {
+                id,
+                prev,
+                next,
+                order,
+            } => {
+                // As in `Edit::Patched`, only the reverse direction can need
+                // the key order put back: replaying forwards removes the same
+                // key from the same map again.
+                let (value, order) = if forward {
+                    (next, None)
+                } else {
+                    (prev, order.as_deref())
+                };
+                self.write_file_raw(id, value.as_ref(), order, acc);
+            }
         }
     }
 
@@ -595,13 +666,118 @@ impl Doc {
         keys.push(("versionNonce".to_string(), Some(Value::from(nonce))));
         keys.push(("updated".to_string(), Some(Value::from(self.now))));
         if let Some(prev) = self.write_raw(id, &keys, None, acc) {
-            out.push(Edit::Patched {
-                id: id.to_string(),
-                prev,
-                next: keys,
-                rest_order,
-            });
+            // Through `merge_patch` rather than straight onto the vector: one
+            // command can write the same element twice — a `Batch` of two
+            // patches, a `Bind` that maintains a back-reference on the arrow
+            // itself — and two records for one element inside one entry is a
+            // shape undo and redo disagree about. See `merge_patch`.
+            merge_patch(out, id, prev, keys, rest_order);
         }
+    }
+
+    /// Write keys into `appState` without recording anything — the history
+    /// replay path, and the one place that map is mutated.
+    fn write_app_state_raw(&mut self, keys: &[KeyEdit], order: Option<&[String]>, acc: &mut Acc) {
+        for (key, value) in keys {
+            match value {
+                Some(v) => {
+                    self.scene.app_state.insert(key.clone(), v.clone());
+                }
+                // `shift_remove` for the reason `write_keys` gives: a swap
+                // remove would silently reorder the rest of the map.
+                None => {
+                    self.scene.app_state.shift_remove(key);
+                }
+            }
+        }
+        if let Some(order) = order {
+            restore_key_order(&mut self.scene.app_state, order);
+        }
+        // No element changed, and every element may look different: the theme
+        // inverts every colour, the background is behind all of them, the grid
+        // is under all of them. `structural` is the flag that means "repaint the
+        // lot" — it is the honest answer here even though no index moved, and
+        // there is no finer one to give.
+        acc.structural = true;
+    }
+
+    /// Write keys into `appState` *as an edit*. No version bookkeeping:
+    /// `appState` is not an element and has none.
+    fn write_app_state(&mut self, fields: &Map<String, Value>, out: &mut Vec<Edit>, acc: &mut Acc) {
+        let next = sanitise_app_state(fields);
+        let prev: Vec<KeyEdit> = next
+            .iter()
+            .map(|(k, _)| (k.clone(), self.scene.app_state.get(k).cloned()))
+            .collect();
+        if prev == next {
+            return;
+        }
+        let order = next
+            .iter()
+            .any(|(_, v)| v.is_none())
+            .then(|| self.scene.app_state.keys().cloned().collect::<Vec<String>>());
+        self.write_app_state_raw(&next, None, acc);
+        out.push(Edit::AppStateWritten { prev, next, order });
+    }
+
+    /// Write one entry of the `files` map without recording anything — the
+    /// history replay path, and the one place the map is mutated.
+    fn write_file_raw(
+        &mut self,
+        id: &str,
+        value: Option<&Value>,
+        order: Option<&[String]>,
+        acc: &mut Acc,
+    ) {
+        match value {
+            Some(v) => {
+                self.scene.files.insert(id.to_string(), v.clone());
+            }
+            None => {
+                // `shift_remove` for the same reason `write_keys` uses it: a
+                // swap-remove would drop the last entry into the hole and
+                // silently reorder every image in the saved file.
+                self.scene.files.shift_remove(id);
+            }
+        }
+        if let Some(order) = order {
+            restore_key_order(&mut self.scene.files, order);
+        }
+        // The bytes are not an element, but the images that name them are: an
+        // `image` whose file has just arrived has to repaint, and nothing else
+        // in the scene has changed at all.
+        let referrers: Vec<usize> = self
+            .scene
+            .elements
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.file_id.as_deref() == Some(id))
+            .map(|(i, _)| i)
+            .collect();
+        for i in referrers {
+            acc.touch(&self.scene.elements[i]);
+        }
+    }
+
+    /// Write one entry of the `files` map *as an edit*. No version bookkeeping:
+    /// a file entry is not an element and has none.
+    fn write_file(&mut self, id: &str, value: Option<&Value>, out: &mut Vec<Edit>, acc: &mut Acc) {
+        let prev = self.scene.files.get(id).cloned();
+        let next = value.cloned();
+        if prev == next {
+            return;
+        }
+        // Only a removal can disturb the order of the map.
+        let order = next
+            .is_none()
+            .then(|| self.scene.files.keys().cloned().collect::<Vec<String>>());
+        self.write_file_raw(id, value, None, acc);
+        out.push(Edit::FileWritten {
+            id: id.to_string(),
+            prev,
+            next,
+            order,
+        });
     }
 
     fn insert_at(&mut self, index: usize, element: Element, acc: &mut Acc) {
@@ -722,11 +898,20 @@ impl Doc {
             }
 
             Command::Delete { ids } => {
-                self.detach_references(ids, out, acc);
+                // A container's label goes with it. A text whose `containerId`
+                // names an element that is no longer there is the dangling
+                // reference `detach_references` exists to prevent, and unlike
+                // an arrow — which is a shape in its own right once unbound —
+                // a label has no meaning apart from its container. Excalidraw
+                // cascades the same way. Expanding here rather than in the
+                // caller means every delete path gets it, including undo's
+                // inverse and the eraser.
+                let doomed = self.with_bound_text(ids);
+                self.detach_references(&doomed, out, acc);
                 // Descending, so each index is still valid as we go and so
                 // the reversed replay reinserts in ascending order.
                 let mut indices: Vec<usize> =
-                    ids.iter().filter_map(|id| self.index_of(id)).collect();
+                    doomed.iter().filter_map(|id| self.index_of(id)).collect();
                 indices.sort_unstable();
                 indices.dedup();
                 for index in indices.into_iter().rev() {
@@ -789,6 +974,28 @@ impl Doc {
                 end,
                 binding,
             } => self.bind(arrow, *end, binding.as_ref(), out, acc),
+
+            Command::BindLabel { container, text } => self.bind_label(container, text, out, acc),
+
+            Command::UnbindLabel { text } => self.unbind_label(text, out, acc),
+
+            Command::SetAppState { fields } => self.write_app_state(fields, out, acc),
+
+            Command::PutFile { id, entry } => self.write_file(id, Some(entry), out, acc),
+
+            Command::DropFile { id } => self.write_file(id, None, out, acc),
+
+            Command::Reseed { ids } => {
+                for id in ids {
+                    if self.index_of(id).is_none() {
+                        continue;
+                    }
+                    // The same stream `fresh_identity` draws a new element's
+                    // seed from; a re-sketch is a new draw of the same shape.
+                    let seed = self.rng.next_nonce();
+                    self.write(id, vec![("seed".to_string(), Some(Value::from(seed)))], out, acc);
+                }
+            }
         }
     }
 
@@ -973,16 +1180,65 @@ impl Doc {
             let still_bound =
                 other_target.as_deref() == Some(old.as_str()) || new_target.as_deref() == Some(old.as_str());
             if !still_bound {
-                self.set_bound_element(old, arrow, false, out, acc);
+                self.set_bound_element(old, arrow, "arrow", false, out, acc);
             }
         }
         if let Some(new) = &new_target {
-            self.set_bound_element(new, arrow, true, out, acc);
+            self.set_bound_element(new, arrow, "arrow", true, out, acc);
         }
     }
 
-    /// Add or remove `{ id: <arrow>, type: "arrow" }` in a shape's
-    /// `boundElements`.
+    /// Put a label inside a container, maintaining both halves the way
+    /// [`Doc::bind`] does for an arrow: `containerId` on the text, a
+    /// `{id, type: "text"}` entry in the container's `boundElements`.
+    ///
+    /// Refuses anything that is not a text going into one of Excalidraw's
+    /// text-bindable containers. A `containerId` on a freedraw, or naming a
+    /// frame, is a file excalidraw.com opens and then behaves oddly around —
+    /// and the refusal belongs here rather than at each caller for the same
+    /// reason the version bookkeeping does.
+    fn bind_label(&mut self, container: &str, text: &str, out: &mut Vec<Edit>, acc: &mut Acc) {
+        let Some(ti) = self.index_of(text) else { return };
+        let Some(ci) = self.index_of(container) else { return };
+        if self.scene.elements[ti].kind != ElementKind::Text
+            || !self.scene.elements[ci].kind.is_label_container()
+            || container == text
+        {
+            return;
+        }
+        // A text may only be in one container. Detaching the old one first
+        // keeps it from holding a back-reference to a label it no longer has —
+        // the same half-a-binding failure `bind` guards against.
+        let old = self.scene.elements[ti].container_id.clone();
+        if let Some(old) = old.filter(|o| o != container) {
+            self.set_bound_element(&old, text, "text", false, out, acc);
+        }
+        self.write(
+            text,
+            vec![(
+                "containerId".to_string(),
+                Some(Value::String(container.to_string())),
+            )],
+            out,
+            acc,
+        );
+        self.set_bound_element(container, text, "text", true, out, acc);
+    }
+
+    /// Take a label out of its container, both halves. The text stays in the
+    /// scene as a free-floating element.
+    fn unbind_label(&mut self, text: &str, out: &mut Vec<Edit>, acc: &mut Acc) {
+        let Some(ti) = self.index_of(text) else { return };
+        let Some(container) = self.scene.elements[ti].container_id.clone() else {
+            return;
+        };
+        self.write(text, vec![("containerId".to_string(), None)], out, acc);
+        self.set_bound_element(&container, text, "text", false, out, acc);
+    }
+
+    /// Add or remove `{ id, type: <kind> }` in a shape's `boundElements` —
+    /// `"arrow"` for an arrow bound to the shape, `"text"` for the label
+    /// inside it.
     ///
     /// Removing from a shape that never had the key is a no-op rather than a
     /// write of `[]` — a file that did not carry `boundElements` should not
@@ -990,7 +1246,8 @@ impl Doc {
     fn set_bound_element(
         &mut self,
         shape: &str,
-        arrow: &str,
+        bound: &str,
+        kind: &str,
         add: bool,
         out: &mut Vec<Edit>,
         acc: &mut Acc,
@@ -1002,20 +1259,20 @@ impl Doc {
             (None, true) => Vec::new(),
             (Some(v), _) => v.clone(),
         };
-        let present = list.iter().any(|b| b.id == arrow);
+        let present = list.iter().any(|b| b.id == bound);
         if add {
             if present {
                 return;
             }
             list.push(BoundElement {
-                id: arrow.to_string(),
-                kind: "arrow".to_string(),
+                id: bound.to_string(),
+                kind: kind.to_string(),
             });
         } else {
             if !present {
                 return;
             }
-            list.retain(|b| b.id != arrow);
+            list.retain(|b| b.id != bound);
         }
         let Ok(value) = serde_json::to_value(&list) else {
             return;
@@ -1026,6 +1283,57 @@ impl Doc {
             out,
             acc,
         );
+    }
+
+    /// `ids` plus the label of every container among them, read off the
+    /// container's own `boundElements` — Excalidraw's `getBoundTextElementId`
+    /// cascade.
+    ///
+    /// One-directional on purpose: a container takes its label with it, and a
+    /// label deleted on its own leaves the container standing.
+    ///
+    /// Deliberately the container's half of the reference and not the text's:
+    /// a file in which only `containerId` was written names a relationship the
+    /// container does not agree to, and quietly deleting somebody else's text
+    /// on the strength of it is worse than leaving it. That case is handled the
+    /// other way, in [`Doc::detach_references`], by clearing the dangling
+    /// `containerId` instead.
+    fn with_bound_text(&self, ids: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = ids.to_vec();
+        for id in ids {
+            let Some(i) = self.index_of(id) else { continue };
+            let Some(list) = &self.scene.elements[i].bound_elements else { continue };
+            for b in list.iter().filter(|b| b.kind == "text") {
+                if !out.contains(&b.id) && self.index_of(&b.id).is_some() {
+                    out.push(b.id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The id of the text bound inside `container`, if it has one. The reader
+    /// for what [`Command::BindLabel`] writes — an editor needs it to reopen an
+    /// existing label rather than stack a second one on top.
+    pub fn bound_text_of(&self, container: &str) -> Option<&str> {
+        let i = self.index_of(container)?;
+        let named = self.scene.elements[i]
+            .bound_elements
+            .as_ref()
+            .and_then(|list| list.iter().find(|b| b.kind == "text"))
+            .map(|b| b.id.as_str());
+        // The container's own list first, then the other half of the
+        // reference: a file may carry `containerId` on the text and no
+        // `boundElements` entry at all, and the label is still its label.
+        named
+            .filter(|id| self.index_of(id).is_some())
+            .or_else(|| {
+                self.scene
+                    .elements
+                    .iter()
+                    .find(|e| e.container_id.as_deref() == Some(container))
+                    .map(|e| e.id.as_str())
+            })
     }
 
     /// Before elements are removed, take every reference to them off the
@@ -1058,6 +1366,16 @@ impl Doc {
                     if doomed.contains(&b.element_id) {
                         keys.push((end.key().to_string(), None));
                     }
+                }
+            }
+            // A label whose container is going. `Command::Delete` takes a
+            // container's own listed label with it, so what reaches here is the
+            // file that arrived half-bound — a text naming a container that
+            // does not name it back. The text survives; its dangling
+            // `containerId` does not.
+            if let Some(c) = &e.container_id {
+                if doomed.contains(c) {
+                    keys.push(("containerId".to_string(), None));
                 }
             }
             if let Some(list) = &e.bound_elements {
@@ -1503,71 +1821,91 @@ pub fn indices_between(a: Option<&str>, b: Option<&str>, n: usize) -> Vec<String
 /// after-state.
 ///
 /// The compaction is what makes coalescing worth doing: four hundred pointer
-/// moves become one `Patched` record per element, not four hundred. A patch
-/// only merges backwards into another patch on the same element with no
-/// structural edit in between — an element that was removed and reinserted
-/// mid-gesture is not the same element as far as history is concerned, and
-/// merging across that would replay the keys against the wrong state.
+/// moves become one `Patched` record per element, not four hundred.
 fn fold_edits(dst: &mut Vec<Edit>, src: Vec<Edit>) {
     for edit in src {
-        let Edit::Patched {
-            id,
-            prev,
-            next,
-            rest_order,
-        } = edit
-        else {
-            dst.push(edit);
-            continue;
-        };
-        let barrier = dst
-            .iter()
-            .rposition(|e| !matches!(e, Edit::Patched { .. }))
-            .map_or(0, |i| i + 1);
-        let slot = dst[barrier..]
-            .iter()
-            .position(|e| matches!(e, Edit::Patched { id: other, .. } if *other == id))
-            .map(|i| i + barrier);
-        match slot {
-            Some(i) => {
-                let Edit::Patched {
-                    prev: p0,
-                    next: n0,
-                    rest_order: r0,
-                    ..
-                } = &mut dst[i]
-                else {
-                    continue;
-                };
-                // Earliest capture wins: the key order we put back is the one
-                // from the start of the gesture. A later capture would name
-                // keys the folded undo is about to remove — harmless, since
-                // the restore only orders keys that are still there — but the
-                // earliest is the one that is right by construction.
-                if r0.is_none() {
-                    *r0 = rest_order;
-                }
-                // First write wins on the way back: the before-state we keep
-                // is the one from the start of the gesture.
-                for (k, v) in prev {
-                    if !p0.iter().any(|(k0, _)| *k0 == k) {
-                        p0.push((k, v));
-                    }
-                }
-                // Last write wins on the way forward.
-                for (k, v) in next {
-                    match n0.iter_mut().find(|(k0, _)| *k0 == k) {
-                        Some(existing) => existing.1 = v,
-                        None => n0.push((k, v)),
-                    }
-                }
-            }
-            None => dst.push(Edit::Patched {
+        match edit {
+            Edit::Patched {
                 id,
                 prev,
                 next,
                 rest_order,
-            }),
+            } => merge_patch(dst, &id, prev, next, rest_order),
+            other => dst.push(other),
+        }
+    }
+}
+
+/// Record a key-write, folding it into the same element's existing record in
+/// this entry when there is one.
+///
+/// A patch merges backwards only into the run of patches at the end: a
+/// structural edit in between means the element was removed and reinserted, and
+/// keys recorded before that would replay against the wrong state.
+///
+/// **Why one record per element per entry rather than a list.** Two records for
+/// one element compose correctly only while they share no key. The moment they
+/// do, which record is replayed last decides the answer — and the two
+/// directions disagree about that: undo replays an entry backwards and so ends
+/// on the *earliest* record, redo replays it forwards and ends on the *latest*.
+/// One record per element removes the ambiguity by construction: earliest
+/// `prev` per key, latest `next` per key, one place each.
+///
+/// Reachable by any command that writes one element twice — a `Batch` carrying
+/// two patches for the same id, or a `Bind` whose target is the arrow itself —
+/// and then coalesces with the next command.
+fn merge_patch(
+    out: &mut Vec<Edit>,
+    id: &str,
+    prev: Vec<KeyEdit>,
+    next: Vec<KeyEdit>,
+    rest_order: Option<Vec<String>>,
+) {
+    let barrier = out
+        .iter()
+        .rposition(|e| !matches!(e, Edit::Patched { .. }))
+        .map_or(0, |i| i + 1);
+    let slot = out[barrier..]
+        .iter()
+        .position(|e| matches!(e, Edit::Patched { id: other, .. } if other == id))
+        .map(|i| i + barrier);
+    let Some(i) = slot else {
+        out.push(Edit::Patched {
+            id: id.to_string(),
+            prev,
+            next,
+            rest_order,
+        });
+        return;
+    };
+    let Edit::Patched {
+        prev: p0,
+        next: n0,
+        rest_order: r0,
+        ..
+    } = &mut out[i]
+    else {
+        return;
+    };
+    // Earliest capture wins: the key order we put back is the one from the
+    // start of the gesture. A later capture would name keys the folded undo is
+    // about to remove — harmless, since the restore only orders keys that are
+    // still there — but the earliest is the one that is right by construction.
+    if r0.is_none() {
+        *r0 = rest_order;
+    }
+    // First write wins on the way back: the before-state we keep is the one
+    // from the start of the gesture.
+    for (k, v) in prev {
+        if !p0.iter().any(|(k0, _)| *k0 == k) {
+            p0.push((k, v));
+        }
+    }
+    // Last write wins on the way forward.
+    for (k, v) in next {
+        match n0.iter_mut().find(|(k0, _)| *k0 == k) {
+            Some(existing) => existing.1 = v,
+            None => n0.push((k, v)),
         }
     }
 }

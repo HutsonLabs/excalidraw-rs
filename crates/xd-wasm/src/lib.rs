@@ -90,6 +90,16 @@ pub struct XdDoc {
     selection: Vec<String>,
     /// The element currently being dragged out, if any.
     draft: Option<String>,
+    /// The rotation in progress, under the coalesce key that identifies it.
+    ///
+    /// Rotation is the one gesture that cannot be computed from the scene as it
+    /// stands — see [`ops::RotateAnchor`] — so the frame it started in lives
+    /// here for the life of the gesture, exactly as the draft does. The key is
+    /// part of the value rather than a separate flag because it is what says
+    /// "this is the same gesture": the editor mints a fresh one per pointer-down
+    /// (`rotate:<n>`), so a new drag can never inherit the previous drag's
+    /// pivot.
+    rotate: Option<(String, ops::RotateAnchor)>,
 }
 
 #[wasm_bindgen]
@@ -99,12 +109,12 @@ impl XdDoc {
     /// open, not a crash.
     pub fn open(text: &str) -> Result<XdDoc, JsValue> {
         Doc::from_json(text)
-            .map(|doc| XdDoc { doc, selection: Vec::new(), draft: None })
+            .map(|doc| XdDoc { doc, selection: Vec::new(), draft: None, rotate: None })
             .map_err(|e| JsValue::from_str(&e))
     }
 
     pub fn blank() -> XdDoc {
-        XdDoc { doc: Doc::blank(), selection: Vec::new(), draft: None }
+        XdDoc { doc: Doc::blank(), selection: Vec::new(), draft: None, rotate: None }
     }
 
     #[wasm_bindgen(js_name = toJson)]
@@ -197,6 +207,26 @@ impl XdDoc {
         to_js(&self.doc.scene().files)
     }
 
+    /// Put an entry in the `files` map — the bytes an image element's `fileId`
+    /// names — as one undoable act.
+    ///
+    /// Excalidraw keys these by a hash of the content, so re-adding the same
+    /// image writes the same value and the command sees no change at all.
+    /// Nothing here inspects the entry: it is `{mimeType, id, dataURL, created}`
+    /// as far as the caller is concerned and raw JSON as far as this crate is.
+    #[wasm_bindgen(js_name = putFile)]
+    pub fn put_file(&mut self, id: &str, entry: JsValue) -> Result<Change, JsValue> {
+        let entry = serde_wasm_bindgen::from_value::<Value>(entry)
+            .map_err(|e| JsValue::from_str(&format!("that isn't a file entry: {e}")))?;
+        Ok(self.doc.apply(Command::PutFile { id: id.to_string(), entry }).into())
+    }
+
+    /// Take an entry out of the `files` map.
+    #[wasm_bindgen(js_name = dropFile)]
+    pub fn drop_file(&mut self, id: &str) -> Change {
+        self.doc.apply(Command::DropFile { id: id.to_string() }).into()
+    }
+
     // --- hit-testing --------------------------------------------------------
 
     /// The topmost element under a point, or -1. `threshold` is stroke slop in
@@ -236,6 +266,19 @@ impl XdDoc {
         ops::selection_frame(&self.doc, &self.selection).map(|f| f.bounds.to_array().to_vec())
     }
 
+    /// The axis-aligned box that *contains* the selection, `[minX, minY, maxX,
+    /// maxY]`.
+    ///
+    /// Not the same question as `selectionBounds`, which answers "what box do
+    /// the handles belong on" and gives a single rotated element its own
+    /// unrotated box. This one is the union of the rotated boxes — where the
+    /// selection actually is on the canvas — which is what zoom-to-selection
+    /// and scroll-back-to-content need.
+    #[wasm_bindgen(js_name = selectionExtent)]
+    pub fn selection_extent(&self) -> Option<Vec<f64>> {
+        ops::selection_bounds(&self.doc, &self.selection).map(|b| b.to_array().to_vec())
+    }
+
     /// The selection's shared rotation, or 0 when several elements are
     /// selected — a multi-selection has no single angle, and its box is drawn
     /// axis-aligned for the same reason.
@@ -264,13 +307,17 @@ impl XdDoc {
         }
     }
 
+    /// Select everything a gesture could have selected — which excludes locked
+    /// elements, as Excalidraw's own select-all does. A ⌘A that pulled a locked
+    /// element in would make the next drag move the one thing the user said not
+    /// to move.
     #[wasm_bindgen(js_name = selectAll)]
     pub fn select_all(&mut self) {
         self.selection = self
             .doc
             .elements()
             .iter()
-            .filter(|e| !e.is_deleted)
+            .filter(|e| !e.is_deleted && e.locked != Some(true))
             .map(|e| e.id.clone())
             .collect();
     }
@@ -301,6 +348,51 @@ impl XdDoc {
         let f = ops::selection_frame(&self.doc, &self.selection)?;
         let pts = geometry::handle_points(&f.bounds, f.angle, scene_per_px);
         Some(pts.iter().flat_map(|(x, y)| [*x, *y]).collect())
+    }
+
+    /// The selected element's own points as `[x0, y0, x1, y1, …]`, or
+    /// `undefined` when the selection is not exactly one element with a point
+    /// list.
+    ///
+    /// These are the grips an arrow's endpoints are dragged by — the gesture the
+    /// nine box handles cannot express, because an endpoint is not on the box.
+    /// A caller that finds a point handle here must prefer it over
+    /// `handleAt`: on a diagonal arrow the endpoints land on the box's corner
+    /// handles, and the endpoint has to win or it is ungrabbable.
+    #[wasm_bindgen(js_name = pointHandles)]
+    pub fn point_handles(&self) -> Option<Vec<f64>> {
+        let e = self.sole_selection()?;
+        let pts = geometry::point_handles(e);
+        (!pts.is_empty()).then(|| pts.iter().flat_map(|(x, y)| [*x, *y]).collect())
+    }
+
+    /// The midpoint of each segment of the selected element, same shape as
+    /// `pointHandles`. Excalidraw shows these as the "add a point here" targets.
+    #[wasm_bindgen(js_name = midpointHandles)]
+    pub fn midpoint_handles(&self) -> Option<Vec<f64>> {
+        let e = self.sole_selection()?;
+        let pts = geometry::segment_midpoints(e);
+        (!pts.is_empty()).then(|| pts.iter().flat_map(|(x, y)| [*x, *y]).collect())
+    }
+
+    /// The index of the point within `radius` of `(x, y)`, or -1. `radius` is in
+    /// scene units, like `handleAt`'s.
+    #[wasm_bindgen(js_name = pointHandleAt)]
+    pub fn point_handle_at(&self, x: f64, y: f64, radius: f64) -> i32 {
+        self.sole_selection()
+            .and_then(|e| geometry::point_handle_at(e, x, y, radius))
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    /// The index of the *segment* whose midpoint is within `radius` of
+    /// `(x, y)`, or -1. Segment `i` runs from point `i` to point `i + 1`.
+    #[wasm_bindgen(js_name = midpointHandleAt)]
+    pub fn midpoint_handle_at(&self, x: f64, y: f64, radius: f64) -> i32 {
+        self.sole_selection()
+            .and_then(|e| geometry::segment_midpoint_at(e, x, y, radius))
+            .map(|i| i as i32)
+            .unwrap_or(-1)
     }
 
     // --- editing ------------------------------------------------------------
@@ -336,9 +428,25 @@ impl XdDoc {
         self.with_reflow(change, key)
     }
 
+    /// Turn the selection so its rotate handle follows `(px, py)`.
+    ///
+    /// The first call under a given `key` captures the frame the gesture starts
+    /// in and every later call is a delta against it — see
+    /// [`ops::RotateAnchor`]. An empty key is a one-shot rotation and captures
+    /// afresh each time.
     #[wasm_bindgen(js_name = rotateTo)]
     pub fn rotate_to(&mut self, px: f64, py: f64, snap: f64, key: &str) -> Change {
-        let change = ops::rotate(&mut self.doc, &self.selection, px, py, snap, some(key));
+        let fresh = match &self.rotate {
+            Some((k, _)) => key.is_empty() || k != key,
+            None => true,
+        };
+        if fresh {
+            self.rotate = ops::RotateAnchor::new(&self.doc, &self.selection)
+                .map(|a| (key.to_string(), a));
+        }
+        let Some((_, anchor)) = self.rotate.take() else { return self.doc.no_change().into() };
+        let change = ops::rotate(&mut self.doc, &anchor, px, py, snap, some(key));
+        self.rotate = Some((key.to_string(), anchor));
         self.with_reflow(change, key)
     }
 
@@ -452,7 +560,12 @@ impl XdDoc {
         // it is finished. Excalidraw does this and people rely on it without
         // knowing it has a name — an arrow you have to explicitly attach is an
         // arrow that will be left unattached.
-        if e.kind.is_linear() {
+        //
+        // An *arrow*, not any linear element: Excalidraw's `isBindingElement`
+        // admits arrows only, so binding a `line` writes a `startBinding`
+        // excalidraw.com will not act on — a diagram that re-routes here and is
+        // inert there.
+        if e.kind.is_binding_element() {
             let (a, _) = ops::rebind_end(&mut self.doc, &id, false);
             let (b, _) = ops::rebind_end(&mut self.doc, &id, true);
             return merge(a, b).into();
@@ -460,8 +573,10 @@ impl XdDoc {
 
         // A box dragged up and to the left has negative extents, which is
         // legal in the format but makes every later comparison work harder.
+        // Point-list geometry is exempt: its extent is derived from the points,
+        // so rewriting x/y here would move the origin out from under them.
         let (x, y, w, h) = (e.x, e.y, e.width, e.height);
-        if w < 0.0 || h < 0.0 {
+        if !e.kind.has_points() && (w < 0.0 || h < 0.0) {
             let mut fields = Map::new();
             fields.insert("x".into(), serde_json::json!(if w < 0.0 { x + w } else { x }));
             fields.insert("y".into(), serde_json::json!(if h < 0.0 { y + h } else { y }));
@@ -474,7 +589,13 @@ impl XdDoc {
 
     /// Insert a finished element from a plain JS object — the path text and
     /// paste take, where the shape is known before it exists.
-    pub fn insert(&mut self, element: JsValue) -> Result<Change, JsValue> {
+    ///
+    /// `at` is the z-order index to land on; leave it off (or pass a negative
+    /// number) for "on top", which is where a drawing gesture puts a new shape.
+    /// Naming one is what "paste in place" and "paste behind" need — the
+    /// fractional index is keyed from where the element actually lands, so an
+    /// insert lower down is correctly ordered for excalidraw.com too.
+    pub fn insert(&mut self, element: JsValue, at: Option<i32>) -> Result<Change, JsValue> {
         let mut value: Map<String, Value> =
             from_js_map(&element).ok_or_else(|| JsValue::from_str("insert expects an object"))?;
         // The caller may not name an id or a seed, and must not be trusted
@@ -484,16 +605,40 @@ impl XdDoc {
         value.insert("seed".into(), serde_json::json!(seed));
         let el: xd_core::scene::Element = serde_json::from_value(Value::Object(value))
             .map_err(|e| JsValue::from_str(&format!("that isn't an element: {e}")))?;
-        let change = self.doc.apply(Command::Insert { at: None, element: Box::new(el) });
+        let at = at.filter(|i| *i >= 0).map(|i| i as usize);
+        let change = self.doc.apply(Command::Insert { at, element: Box::new(el) });
         self.selection = vec![id];
         Ok(change.into())
     }
 
     /// Patch one element by id — the escape hatch the text overlay uses when
     /// it has measured a label and knows its real width.
-    pub fn patch(&mut self, id: &str, fields: JsValue) -> Change {
+    ///
+    /// `key` is the coalesce key, as on `dragBy`: leave it off and the patch is
+    /// its own undo entry, pass one and every patch under it folds into a single
+    /// entry. That is what a sweep needs — an eraser crossing forty shapes is
+    /// one press of ⌘Z, not forty — and there is no other way to express it,
+    /// since each element needs its own `Patch`.
+    pub fn patch(&mut self, id: &str, fields: JsValue, key: Option<String>) -> Change {
+        let Some(fields) = from_js_map(&fields) else { return self.doc.no_change().into() };
+        let cmd = Command::Patch { id: id.to_string(), fields };
+        match key.as_deref().filter(|k| !k.is_empty()) {
+            Some(key) => self.doc.apply_keyed(cmd, key, self.doc.now()).into(),
+            None => self.doc.apply(cmd).into(),
+        }
+    }
+
+    /// Merge keys into the scene's `appState` — the canvas background, the
+    /// theme, the grid size — as one undoable act.
+    ///
+    /// A shallow merge, and a `null` value removes a key. `appState` is held as
+    /// raw JSON on purpose (nothing in the core decides anything about it), and
+    /// this keeps that: keys it has never heard of pass straight through and
+    /// keys it is not given are left exactly as they were.
+    #[wasm_bindgen(js_name = setAppState)]
+    pub fn set_app_state(&mut self, fields: JsValue) -> Change {
         match from_js_map(&fields) {
-            Some(fields) => self.doc.apply(Command::Patch { id: id.to_string(), fields }).into(),
+            Some(fields) => self.doc.apply(Command::SetAppState { fields }).into(),
             None => self.doc.no_change().into(),
         }
     }
@@ -501,9 +646,31 @@ impl XdDoc {
     #[wasm_bindgen(js_name = setStyle)]
     pub fn set_style(&mut self, style: JsValue) -> Change {
         match from_js_map(&style) {
-            Some(style) => ops::set_style(&mut self.doc, &self.selection, &style).into(),
+            Some(style) => ops::set_style(&mut self.doc, &self.selection, &style, false).into(),
             None => self.doc.no_change().into(),
         }
+    }
+
+    /// A style patch that also re-rolls the seed of everything it touches, as
+    /// one undo entry — what a sloppiness change is.
+    ///
+    /// Excalidraw draws a *different sketch* on every sloppiness click. Scaling
+    /// the same random draws by a larger roughness instead reads as the stroke
+    /// getting bolder rather than as a different hand, which is the reported
+    /// "smooth to bold". The two writes have to be one entry: undo landing
+    /// between them would leave the new roughness on the old seed.
+    #[wasm_bindgen(js_name = setStyleResketched)]
+    pub fn set_style_resketched(&mut self, style: JsValue) -> Change {
+        match from_js_map(&style) {
+            Some(style) => ops::set_style(&mut self.doc, &self.selection, &style, true).into(),
+            None => self.doc.no_change().into(),
+        }
+    }
+
+    /// Re-roll the selection's seeds and change nothing else — a fresh sketch
+    /// of the same shapes.
+    pub fn reseed(&mut self) -> Change {
+        ops::reseed(&mut self.doc, &self.selection, None).into()
     }
 
     #[wasm_bindgen(js_name = deleteSelection)]
@@ -531,6 +698,41 @@ impl XdDoc {
             _ => Reorder::Backward,
         };
         self.doc.apply(Command::Reorder { ids: self.selection.clone(), how }).into()
+    }
+
+    /// Line the selection up on one edge of its own box: `"left"`, `"centerH"`,
+    /// `"right"`, `"top"`, `"centerV"`, `"bottom"`. Needs two elements.
+    ///
+    /// Strings here, rather than the integer `reorder` takes, because these
+    /// arrive from a panel button whose own vocabulary is already these words —
+    /// an integer would put a translation table between the click and the model
+    /// for no gain on a path that runs once per press.
+    pub fn align(&mut self, edge: &str) -> Change {
+        let Some(edge) = ops::Edge::parse(edge) else { return self.doc.no_change().into() };
+        let ids = self.selection.clone();
+        let key = self.verb_key();
+        let change = ops::align(&mut self.doc, &ids, edge, Some(&key));
+        self.with_reflow(change, &key)
+    }
+
+    /// Space the selection evenly, `"horizontal"` or `"vertical"`, leaving the
+    /// outermost two where they are. Needs three elements.
+    pub fn distribute(&mut self, axis: &str) -> Change {
+        let Some(axis) = ops::Axis::parse(axis) else { return self.doc.no_change().into() };
+        let ids = self.selection.clone();
+        let key = self.verb_key();
+        let change = ops::distribute(&mut self.doc, &ids, axis, Some(&key));
+        self.with_reflow(change, &key)
+    }
+
+    /// Mirror the selection about the centre line of its own box,
+    /// `"horizontal"` or `"vertical"`. One element flips in place.
+    pub fn flip(&mut self, axis: &str) -> Change {
+        let Some(axis) = ops::Axis::parse(axis) else { return self.doc.no_change().into() };
+        let ids = self.selection.clone();
+        let key = self.verb_key();
+        let change = ops::flip(&mut self.doc, &ids, axis, Some(&key));
+        self.with_reflow(change, &key)
     }
 
     pub fn group(&mut self) -> Change {
@@ -571,6 +773,96 @@ impl XdDoc {
     pub fn rebind_end(&mut self, arrow: &str, at_end: bool) -> Change {
         let (change, _bound) = ops::rebind_end(&mut self.doc, arrow, at_end);
         change.into()
+    }
+
+    /// Drag one point of the selected linear element to `(x, y)`, keyed so the
+    /// whole drag is one undo entry.
+    ///
+    /// Acts on `selection[0]`: the per-point handles are a single-element
+    /// affordance (`pointHandles` returns nothing for a multi-selection), so the
+    /// element to edit is the selected one and there is no id to pass.
+    ///
+    /// Dragging a bound endpoint away from its shape unbinds it, which is what
+    /// makes the endpoint movable at all — see [`ops::move_point`]. Call
+    /// `rebindEnd` on pointer-up to attach it to whatever it was dropped on.
+    #[wasm_bindgen(js_name = movePoint)]
+    pub fn move_point(&mut self, index: usize, x: f64, y: f64, key: &str) -> Change {
+        let Some(id) = self.selection.first().cloned() else {
+            return self.doc.no_change().into();
+        };
+        let change = ops::move_point(&mut self.doc, &id, index, x, y, some(key));
+        self.with_reflow(change, key)
+    }
+
+    /// Add a point to the selected linear element, in the middle of segment
+    /// `index` — clicking a midpoint handle.
+    ///
+    /// `index` is a **segment** index, exactly as `midpointHandleAt` returns it:
+    /// segment `i` runs from point `i` to point `i + 1`, and the new point lands
+    /// between them. Acts on `selection[0]`, for the same reason `movePoint`
+    /// does.
+    ///
+    /// `key` is optional and folds the insert into a surrounding gesture's undo
+    /// entry — pass the drag's key when a click-and-drag adds a point and then
+    /// moves it, so the two are one press of ⌘Z.
+    #[wasm_bindgen(js_name = insertPoint)]
+    pub fn insert_point(&mut self, index: usize, x: f64, y: f64, key: Option<String>) -> Change {
+        let Some(id) = self.selection.first().cloned() else {
+            return self.doc.no_change().into();
+        };
+        let key = key.unwrap_or_default();
+        let change = ops::insert_point(&mut self.doc, &id, index, x, y, some(&key));
+        self.with_reflow(change, &key)
+    }
+
+    // --- container-bound labels ---------------------------------------------
+
+    /// Put a text element inside a container as its label, maintaining both
+    /// halves: `containerId` on the text and a `{id, type:"text"}` entry in the
+    /// container's `boundElements`.
+    ///
+    /// Separate from `bind`, which is arrow-endpoint-shaped. Refused unless the
+    /// text really is a text and the container is one of Excalidraw's
+    /// text-bindable shapes — rectangle, diamond, ellipse or arrow.
+    #[wasm_bindgen(js_name = bindLabel)]
+    pub fn bind_label(&mut self, container: &str, text: &str) -> Change {
+        self.doc
+            .apply(Command::BindLabel {
+                container: container.to_string(),
+                text: text.to_string(),
+            })
+            .into()
+    }
+
+    /// Take a label out of its container, both halves. The text stays in the
+    /// scene, free-floating.
+    #[wasm_bindgen(js_name = unbindLabel)]
+    pub fn unbind_label(&mut self, text: &str) -> Change {
+        self.doc.apply(Command::UnbindLabel { text: text.to_string() }).into()
+    }
+
+    /// The index of the label inside this element, or -1 — how the editor finds
+    /// an existing label to reopen instead of stacking a second one on top.
+    #[wasm_bindgen(js_name = labelOf)]
+    pub fn label_of(&self, index: usize) -> i32 {
+        self.doc
+            .elements()
+            .get(index)
+            .and_then(|e| self.doc.bound_text_of(&e.id))
+            .and_then(|id| self.doc.index_of(id))
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    /// The width a label bound to this container has to wrap inside.
+    ///
+    /// The split this export exists for: only JS can measure a string, and only
+    /// the model knows the container's per-kind budget. Rust says how much room
+    /// there is; JS wraps to it and patches the label's `text`, `width` and
+    /// `height`.
+    #[wasm_bindgen(js_name = labelBudget)]
+    pub fn label_budget(&self, index: usize) -> f64 {
+        self.doc.elements().get(index).map(geometry::label_budget).unwrap_or(0.0)
     }
 
     /// Whether that end is bound now. Separate from `rebindEnd` because
@@ -615,10 +907,34 @@ impl XdDoc {
     /// version bookkeeping is done inside `apply`: a drag that forgets to
     /// reflow leaves the diagram visibly coming apart, and "remember to call
     /// this" is not a mechanism.
+    /// Also puts the label of anything that moved back inside it, for the same
+    /// reason and in the same entry: a container dragged out from under its
+    /// label has visibly come apart.
     fn with_reflow(&mut self, change: xd_core::doc::Change, key: &str) -> Change {
         let ids = self.selection.clone();
+        let labels = ops::reflow_labels(&mut self.doc, &ids, some(key));
         let extra = ops::reflow_bindings(&mut self.doc, &ids, some(key));
-        merge(change, extra).into()
+        merge(merge(change, labels), extra).into()
+    }
+
+    /// A coalesce key unique to this call.
+    ///
+    /// A verb that writes more than once — the move, plus the binding and label
+    /// reflow it forces — has to fold into a single undo entry, and folding is
+    /// keyed. The revision makes the key: it is the same for every write inside
+    /// one call, because the first of them is what advances it, and different for
+    /// the next press of the same button.
+    fn verb_key(&self) -> String {
+        format!("verb:{}", self.doc.revision())
+    }
+
+    /// The one selected element, or `None` for an empty or multiple selection —
+    /// the per-point handles are a single-element affordance.
+    fn sole_selection(&self) -> Option<&xd_core::scene::Element> {
+        match self.selection.as_slice() {
+            [id] => self.doc.index_of(id).map(|i| &self.doc.elements()[i]),
+            _ => None,
+        }
     }
 
     /// Undo can delete what was selected. Dropping the ids that no longer

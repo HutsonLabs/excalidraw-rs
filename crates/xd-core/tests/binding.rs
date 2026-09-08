@@ -132,3 +132,124 @@ fn an_arrow_is_never_bindable_to_another_arrow() {
     let a = &doc.elements()[doc.index_of(&arrow).unwrap()];
     assert!(!binding::is_bindable(a));
 }
+
+#[test]
+fn a_line_across_two_shapes_gains_no_binding() {
+    // The same geometry as every test above, drawn as a `line` instead of an
+    // arrow. Excalidraw's `isBindingElement` admits arrows only, so a line that
+    // bound itself here would re-route in this editor and sit inert on
+    // excalidraw.com — a diagram that means two different things.
+    let mut doc = Doc::blank();
+    let shape = doc.new_element(ElementKind::Rectangle, &Bounds::new(200.0, 100.0, 300.0, 200.0));
+    let shape_id = shape.id.clone();
+    doc.apply(Command::Insert { at: None, element: Box::new(shape) });
+
+    let mut line = doc.new_element(ElementKind::Line, &Bounds::new(0.0, 150.0, 190.0, 150.0));
+    line.points = Some(vec![[0.0, 0.0], [190.0, 0.0]]);
+    let line_id = line.id.clone();
+    doc.apply(Command::Insert { at: None, element: Box::new(line) });
+
+    let (_, bound) = ops::rebind_end(&mut doc, &line_id, true);
+    assert!(!bound, "a line must not bind");
+    let e = &doc.elements()[doc.index_of(&line_id).unwrap()];
+    assert!(e.end_binding.is_none() && e.start_binding.is_none());
+    // And the shape gained no back-reference to it either.
+    assert!(doc.elements()[doc.index_of(&shape_id).unwrap()].bound_elements.is_none());
+}
+
+#[test]
+fn a_line_that_arrived_bound_still_reflows_and_still_round_trips() {
+    // Parsing stays permissive: only *authoring* tightened. A file someone else
+    // wrote with a binding on a line keeps it, and keeps behaving, because
+    // silently dropping a key on open is the one thing this crate must not do.
+    let text = serde_json::json!({
+        "type": "excalidraw", "version": 2, "elements": [
+            { "id": "box", "type": "rectangle", "x": 200.0, "y": 100.0,
+              "width": 100.0, "height": 100.0, "seed": 1, "version": 1, "versionNonce": 1 },
+            { "id": "wire", "type": "line", "x": 0.0, "y": 150.0,
+              "width": 190.0, "height": 0.0, "seed": 2, "version": 1, "versionNonce": 2,
+              "points": [[0.0, 0.0], [190.0, 0.0]],
+              "endBinding": { "elementId": "box", "focus": 0.0, "gap": 4.0 } }
+        ], "appState": {}
+    })
+    .to_string();
+    let mut doc = Doc::from_json(&text).expect("parses");
+    assert!(doc.elements()[doc.index_of("wire").unwrap()].end_binding.is_some());
+
+    let ids = vec!["box".to_string()];
+    ops::translate(&mut doc, &ids, 100.0, 0.0, None);
+    ops::reflow_bindings(&mut doc, &ids, None);
+    let (x, _) = tip(&doc, "wire");
+    assert!(x > 200.0, "the line should still follow the shape it names: {x}");
+}
+
+// ---------------------------------------------------------------------------
+// Dragging an endpoint — the gesture the per-point handles exist for
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dragging_a_bound_endpoint_away_unbinds_it_and_the_tip_stays_put() {
+    let (mut doc, shape, arrow) = scene(ElementKind::Rectangle);
+    ops::rebind_end(&mut doc, &arrow, true);
+    assert!(doc.elements()[doc.index_of(&arrow).unwrap()].end_binding.is_some());
+
+    // Drag the tip well clear of the shape. The regression this guards:
+    // `reflow_bindings` re-aims any arrow whose own id it is given, so a tip
+    // that is patched and then reflowed snaps straight back onto the outline
+    // and the endpoint is immovable.
+    let ids = vec![arrow.clone()];
+    ops::move_point(&mut doc, &arrow, 1, 120.0, 400.0, Some("point:1"));
+    ops::reflow_bindings(&mut doc, &ids, Some("point:1"));
+
+    assert!(
+        doc.elements()[doc.index_of(&arrow).unwrap()].end_binding.is_none(),
+        "dragging an endpoint off its shape is how you unbind it"
+    );
+    let (x, y) = tip(&doc, &arrow);
+    assert!((x - 120.0).abs() < 0.5 && (y - 400.0).abs() < 0.5, "the tip snapped back to {x},{y}");
+    // The shape's back-reference went with it; half a binding is worse than
+    // none.
+    let back = doc.elements()[doc.index_of(&shape).unwrap()].bound_elements.clone();
+    assert!(back.is_none_or(|v| v.iter().all(|b| b.id != arrow)));
+}
+
+#[test]
+fn dropping_an_endpoint_on_another_shape_binds_it_there() {
+    let (mut doc, first, arrow) = scene(ElementKind::Rectangle);
+    ops::rebind_end(&mut doc, &arrow, true);
+
+    let second = doc.new_element(ElementKind::Ellipse, &Bounds::new(400.0, 300.0, 500.0, 400.0));
+    let second_id = second.id.clone();
+    doc.apply(Command::Insert { at: None, element: Box::new(second) });
+
+    // The drag, then the pointer-up that re-evaluates what is under the tip.
+    ops::move_point(&mut doc, &arrow, 1, 450.0, 350.0, Some("point:1"));
+    let (_, bound) = ops::rebind_end(&mut doc, &arrow, true);
+    assert!(bound);
+    let e = &doc.elements()[doc.index_of(&arrow).unwrap()];
+    assert_eq!(e.end_binding.as_ref().map(|b| b.element_id.as_str()), Some(second_id.as_str()));
+    // And the shape it left no longer names it.
+    let back = doc.elements()[doc.index_of(&first).unwrap()].bound_elements.clone();
+    assert!(back.is_none_or(|v| v.iter().all(|b| b.id != arrow)));
+}
+
+#[test]
+fn the_far_end_keeps_reflowing_while_the_near_end_is_dragged() {
+    let (mut doc, shape, arrow) = scene(ElementKind::Rectangle);
+    // Bind the *end* to the shape, then drag the *start* somewhere else: the
+    // bound end must re-aim from the new direction rather than freeze.
+    ops::rebind_end(&mut doc, &arrow, true);
+    let before = tip(&doc, &arrow);
+
+    let ids = vec![arrow.clone()];
+    ops::move_point(&mut doc, &arrow, 0, 100.0, 500.0, Some("point:1"));
+    ops::reflow_bindings(&mut doc, &ids, Some("point:1"));
+
+    let after = tip(&doc, &arrow);
+    assert!(
+        doc.elements()[doc.index_of(&arrow).unwrap()].end_binding.is_some(),
+        "the untouched end keeps its binding"
+    );
+    assert!(after.1 > before.1, "the bound tip should have re-aimed: {before:?} -> {after:?}");
+    assert_eq!(doc.elements()[doc.index_of(&shape).unwrap()].bound_elements.as_ref().unwrap().len(), 1);
+}

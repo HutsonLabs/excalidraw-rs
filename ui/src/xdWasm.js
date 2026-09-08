@@ -99,6 +99,16 @@ export function wrap(inner) {
   const boundsOf = (arr) =>
     arr ? { minX: arr[0], minY: arr[1], maxX: arr[2], maxY: arr[3] } : null;
 
+  /// A flat [x, y, x, y, …] from Rust as [{ x, y }]. Flat because a
+  /// `Float64Array` crosses the boundary as one copy, where an array of
+  /// objects would be one allocation per point on every hover.
+  const pairsOf = (flat) => {
+    if (!flat) return null;
+    const out = [];
+    for (let i = 0; i < flat.length; i += 2) out.push({ x: flat[i], y: flat[i + 1] });
+    return out;
+  };
+
   return {
     // --- reading ---
     get length() { return inner.length; },
@@ -116,6 +126,14 @@ export function wrap(inner) {
     cornerRadius: (i) => inner.cornerRadius(i),
     appState: () => inner.appState(),
     files: () => inner.files(),
+    /// The text element bound to element `i` as a label, or -1. Lets the view
+    /// re-enter a label that arrived in an Excalidraw-authored file without
+    /// scanning every element for a matching `containerId`.
+    labelOf: (i) => inner.labelOf(i),
+    /// How wide a label inside element `i` is allowed to be. Rust recentres a
+    /// label but cannot re-wrap it — it has no font metrics — so the view
+    /// measures against this and patches `text`/`width`/`height` itself.
+    labelBudget: (i) => inner.labelBudget(i),
     toJson: () => inner.toJson(),
     setNow: (ms) => inner.setNow(ms),
 
@@ -126,6 +144,10 @@ export function wrap(inner) {
     // --- selection ---
     get selection() { return Array.from(inner.selection); },
     selectionBounds: () => boundsOf(inner.selectionBounds()),
+    /// The *containment* box of the selection, as distinct from
+    /// `selectionBounds`, which is the drawn selection frame. This is the one
+    /// "zoom to selection" and "scroll back to content" want.
+    selectionExtent: () => boundsOf(inner.selectionExtent()),
     selectionAngle: () => inner.selectionAngle(),
     setSelection: (indices) => inner.setSelection(Uint32Array.from(indices)),
     toggleSelection: (i) => inner.toggleSelection(i),
@@ -137,13 +159,19 @@ export function wrap(inner) {
     /// handle drifts out of reach as the drawing is zoomed.
     handleAt: (x, y, radius, scenePerPx = 1) => inner.handleAt(x, y, radius, scenePerPx),
     /// The nine handles as [{ x, y }], or null when nothing is selected.
-    handlePoints: (scenePerPx = 1) => {
-      const flat = inner.handlePoints(scenePerPx);
-      if (!flat) return null;
-      const out = [];
-      for (let i = 0; i < flat.length; i += 2) out.push({ x: flat[i], y: flat[i + 1] });
-      return out;
-    },
+    handlePoints: (scenePerPx = 1) => pairsOf(inner.handlePoints(scenePerPx)),
+    /// A linear element's own points, as [{ x, y }] — the handles that let an
+    /// arrow endpoint be grabbed, which the bounding box cannot express.
+    /// Null unless exactly one linear element is selected.
+    ///
+    /// Probe this *before* `handleAt`: on a diagonal arrow the endpoints sit
+    /// exactly on the bounding box's corners, and a bbox resize handle winning
+    /// that tie is how dragging an endpoint turns into a scale.
+    pointHandles: () => pairsOf(inner.pointHandles()),
+    /// The midpoint of each segment — where a click adds a new point.
+    midpointHandles: () => pairsOf(inner.midpointHandles()),
+    pointHandleAt: (x, y, radius) => inner.pointHandleAt(x, y, radius),
+    midpointHandleAt: (x, y, radius) => inner.midpointHandleAt(x, y, radius),
 
     // --- editing. Every one of these returns a change descriptor. ---
     dragBy: (dx, dy, key = "") => invalidate(inner.dragBy(dx, dy, key)),
@@ -154,9 +182,63 @@ export function wrap(inner) {
     draftTo: (x, y, lockAspect) => invalidate(inner.draftTo(x, y, !!lockAspect)),
     draftPoint: (x, y, pressure) => invalidate(inner.draftPoint(x, y, pressure)),
     endDraft: (minSize = 2) => invalidate(inner.endDraft(minSize)),
-    insert: (element) => invalidate(inner.insert(element)),
-    patch: (id, fields) => invalidate(inner.patch(id, fields)),
+    /// `at` is a z-order index; undefined or negative means on top, so the
+    /// one-argument call this replaced still means what it did.
+    insert: (element, at) => invalidate(inner.insert(element, at)),
+    /// `key` is a coalesce key: patches sharing one fold into a single undo
+    /// entry, which is what makes an eraser sweep one press of undo rather
+    /// than one per element. Absent or "" means its own entry.
+    patch: (id, fields, key = "") => invalidate(inner.patch(id, fields, key)),
     setStyle: (style) => invalidate(inner.setStyle(style)),
+    /// Apply a style *and* re-roll the affected seeds, as one command.
+    ///
+    /// Two calls would be wrong rather than merely slower: an undo landing
+    /// between them leaves the new roughness sitting on the old seed, and
+    /// Sloppiness would read as one sketch scaled up instead of three hands.
+    setStyleResketched: (style) => invalidate(inner.setStyleResketched(style)),
+    /// Re-roll the seed of everything selected. Takes no arguments — it acts
+    /// on the current selection.
+    reseed: () => invalidate(inner.reseed()),
+    /// Drag one point of the selected linear element. Clears that end's
+    /// binding first, which is what stops the reflow from snapping the
+    /// endpoint back to the shape it was tied to.
+    movePoint: (index, x, y, key = "") => invalidate(inner.movePoint(index, x, y, key)),
+    /// Add a point to the selected linear element. `index` is a *segment*
+    /// index as `midpointHandleAt` returns it — segment i runs from point i to
+    /// point i+1, and the new point lands at i+1.
+    ///
+    /// Unlike `movePoint`, no binding is cleared: an insert is strictly
+    /// between two existing points, so neither endpoint moves and both stay
+    /// bound. Pass the drag's coalesce key when a click adds a point and then
+    /// moves it, so the pair is one undo entry.
+    insertPoint: (index, x, y, key = "") => invalidate(inner.insertPoint(index, x, y, key)),
+    /// The `files` map — image bytes, keyed by `fileId`. `putFile` throws if
+    /// the entry is not an object, because a malformed entry is a broken image
+    /// that would only be discovered on the next open.
+    putFile: (id, entry) => invalidate(inner.putFile(id, entry)),
+    dropFile: (id) => invalidate(inner.dropFile(id)),
+    /// Bind a text element into a container as its label, and the inverse.
+    /// Sets `containerId` and the container's `boundElements` together, so the
+    /// two halves cannot drift apart the way a hand-written pair would.
+    ///
+    /// Both arguments are ids, not indices — every other id-taking export
+    /// (`bind`, `rebindEnd`, `isBound`, `patch`) is the same, and a mixed pair
+    /// would be the only one in the API.
+    bindLabel: (containerId, textId) => invalidate(inner.bindLabel(containerId, textId)),
+    unbindLabel: (textId) => invalidate(inner.unbindLabel(textId)),
+    /// Write into `appState`, merging shallowly; a `null` value removes a key.
+    /// Reports `structural`, because a theme change repaints everything.
+    setAppState: (fields) => invalidate(inner.setAppState(fields)),
+    /// "left" | "centerH" | "right" | "top" | "centerV" | "bottom". A no-op
+    /// below two elements, matching where upstream enables the control.
+    align: (edge) => invalidate(inner.align(edge)),
+    /// "horizontal" | "vertical". Equalises gaps rather than centres, and is a
+    /// no-op below three elements.
+    distribute: (axis) => invalidate(inner.distribute(axis)),
+    /// "horizontal" | "vertical". Negates `angle` and mirrors point lists
+    /// within themselves, so a flipped arrow turns around rather than just
+    /// moving.
+    flip: (axis) => invalidate(inner.flip(axis)),
     deleteSelection: () => invalidate(inner.deleteSelection()),
     duplicateSelection: (dx = 10, dy = 10) => invalidate(inner.duplicateSelection(dx, dy)),
     reorder: (how) => invalidate(inner.reorder(how)),
