@@ -23,6 +23,7 @@ import {
   basename, chooseOpenPath, chooseSavePath, emptyScene, installShortcuts,
   isApp, readFile, startupPath, writeFile,
 } from "./files.js";
+import { installAppMenu } from "./appmenu.js";
 import { exportActions } from "./export.js";
 import { installMenu } from "./menu.js";
 
@@ -172,10 +173,39 @@ const allActions = () => [
   }),
 ];
 
-/// The menu reads `allActions` every time it opens, so it is always describing
-/// the document as it stands — Undo greyed when there is nothing to undo, the
-/// zoom entries acting on the camera as it is now.
-const menu = installMenu(document.getElementById("menu-slot"), { actions: allActions });
+/// The macOS menu bar, once there is one. Null in a browser and on a `file://`
+/// page, and null for as long as it takes the native side to answer.
+let appMenu = null;
+
+/// The popover reads this every time it opens, so it is always describing the
+/// document as it stands — Undo greyed when there is nothing to undo, the zoom
+/// entries acting on the camera as it is now.
+///
+/// Empty once the menu bar is up. The verbs have not gone anywhere; they are in
+/// the menu bar, which is where a Mac application keeps them, and offering the
+/// same Save in two places is how the two come to disagree about whether it is
+/// available. What the popover keeps is the Appearance control it builds itself
+/// — a window preference rather than a verb, and the one thing in it that is not
+/// a duplicate of a menu.
+///
+/// Not empty when there is no menu bar to move them to. An app whose only Save
+/// lives in a menu bar that does not exist is an app you cannot save from.
+const menuActions = () => (appMenu ? [] : allActions());
+
+const menu = installMenu(document.getElementById("menu-slot"), { actions: menuActions });
+
+// The native side answers a turn or more later, so the popover is complete for
+// that first turn and empties itself the next time it opens. Anything that goes
+// wrong here — no menu API, an accelerator the parser refuses — leaves the
+// popover exactly as it was, carrying everything.
+installAppMenu({ actions: allActions })
+  .then((installed) => {
+    appMenu = installed;
+    appMenu?.refresh();
+  })
+  .catch(() => {
+    appMenu = null;
+  });
 
 /// The one line of trouble in the titlebar.
 ///
@@ -196,6 +226,10 @@ function paintStatus() {
 function paintActions() {
   paintStatus();
   menu.refresh();
+  // Both halves are cheap: the popover's refresh returns immediately unless it
+  // is open, and the menu bar's sends nothing for an item whose enabled state
+  // has not moved.
+  appMenu?.refresh();
 }
 
 function setProblem(message) {

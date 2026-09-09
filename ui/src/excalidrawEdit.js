@@ -62,7 +62,7 @@ import {
   drawSnapGuides, HANDLE_SIZE, HANDLES,
 } from "./excalidrawView.js";
 import {
-  applyDarkModeFilter, fontString, imageDataUrl, lineHeightPx, opacityOf,
+  applyDarkModeFilter, fontString, imageDataUrl, isTransparent, lineHeightPx, opacityOf,
 } from "./excalidrawScene.js";
 import {
   clipboardText, drawingSource, fileStyle, openMessage, parseClipboard, strokeWidthPx,
@@ -122,13 +122,21 @@ const EXPORT_SCALE = 2;
 /// which is the exact bug double-clicking a shape used to have.
 const LABELABLE = new Set(["rectangle", "diamond", "ellipse", "arrow"]);
 
-/// The subset of those with an *interior* worth double-clicking into.
-///
-/// An arrow has no inside — its bounding box is mostly empty canvas, and
-/// treating that box as a target would put a label on an arrow because somebody
-/// double-clicked ninety pixels away from it. An arrow is still labelable by
-/// double-clicking the stroke itself, which is a real hit.
-const ENCLOSING = new Set(["rectangle", "diamond", "ellipse"]);
+/// The element types that are a live web view in Excalidraw and a labelled
+/// placeholder here. A double-click on one of them activates the embed upstream,
+/// so it is a gesture that has an owner already and must not fall through to
+/// creating text on top of the box.
+const EMBEDDED = new Set(["embeddable", "iframe", "magicframe"]);
+
+/// How near a container's centre text has to land before it means "inside this
+/// shape" rather than "here". Excalidraw's `TEXT_TO_CENTER_SNAP_THRESHOLD`
+/// (constants.ts:24), and in *scene* units as upstream measures it — a distance
+/// in the drawing, so the same double-click means the same thing at every zoom.
+const TEXT_TO_CENTER_SNAP = 30;
+
+/// How far apart the two clicks of a double-click may land, in screen pixels.
+/// Excalidraw's `DOUBLE_TAP_POSITION_THRESHOLD` (constants.ts:548).
+const DOUBLE_CLICK_SLOP = 35;
 
 // --- SVG, as a second surface rather than a second painter -------------------
 //
@@ -565,6 +573,29 @@ export function renderExcalidraw(host, text, {
 
   // --- painting ------------------------------------------------------------
 
+  /// The theme the drawing is painted in: "dark" or "light".
+  ///
+  /// The *host's*, not the document's. Excalidraw's dark theme is a per-colour
+  /// transform of the same file rather than a second palette (see
+  /// `applyDarkModeFilter`), which makes the theme a property of who is looking
+  /// rather than of what is being looked at — so there is one control for it and
+  /// it belongs to whoever owns the window. In this app that is the appearance
+  /// segment in the menu, which resolves light/dark/system down to `data-theme`
+  /// on <html>; the properties panel used to carry a second, document-level one,
+  /// and two controls for one question is how you get a drawing that is dark in
+  /// the sidebar's opinion and light in the window's.
+  ///
+  /// A host that says nothing — a term.hut pane, a plain file:// page — leaves
+  /// `appState.theme` to answer, which is the file's own record of the theme it
+  /// was last looked at in and is exactly what a read-only pane should honour.
+  const paintTheme = () => {
+    const host = wrap.ownerDocument?.documentElement?.dataset?.theme;
+    if (host === "dark" || host === "light") return host;
+    return scene.appState?.theme === "dark" ? "dark" : "light";
+  };
+
+  const isDarkTheme = () => paintTheme() === "dark";
+
   const schedule = () => {
     if (frame || detached) return;
     frame = requestAnimationFrame(paint);
@@ -588,13 +619,13 @@ export function renderExcalidraw(host, text, {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     // The scene's own background, not the app's: a drawing authored on white
-    // is unreadable composited onto a dark pane. Filtered for the document's
-    // theme exactly as every element is (excalidrawView.js's `drawElement`), so
-    // a dark-themed file's inverted strokes land on an inverted background
+    // is unreadable composited onto a dark pane. Filtered for the theme it is
+    // being viewed in exactly as every element is (excalidrawView.js's
+    // `drawElement`), so inverted strokes land on an inverted background
     // instead of a white one.
     ctx.fillStyle = applyDarkModeFilter(
       scene.appState?.viewBackgroundColor || "#ffffff",
-      scene.appState?.theme === "dark",
+      isDarkTheme(),
     );
     ctx.fillRect(0, 0, w, h);
     ctx.translate(camera.x, camera.y);
@@ -621,7 +652,7 @@ export function renderExcalidraw(host, text, {
           pending?.has(element.id)
             ? { ...element, opacity: (element.opacity ?? 100) * ERASE_PREVIEW }
             : element,
-          scene, images,
+          scene, images, paintTheme(),
         );
       } catch {
         // One malformed element must not blank the whole drawing.
@@ -883,6 +914,15 @@ export function renderExcalidraw(host, text, {
         name: "Undo", shortcut: "⌘Z", group: "edit" },
       { id: "xd-redo", label: "↷", title: "Redo (⌘⇧Z)", run: act(() => history("redo")), disabled: !doc?.canRedo(),
         name: "Redo", shortcut: "⇧⌘Z", group: "edit" },
+      // Two verbs with nothing to draw on a button, so they are a menu's and no
+      // row's (see viewActions.js's header). They are here rather than only on
+      // the right-click popover because the macOS Edit menu is where a hand looks
+      // for them, and because the alternative there is the *predefined* Select
+      // All, which selects the page's text and not the drawing's elements.
+      { id: "xd-select-all", run: act(() => { doc.selectAll(); reselected(); }),
+        name: "Select all", shortcut: "⌘A", group: "edit" },
+      { id: "xd-delete", run: act(() => { edited(doc.deleteSelection()); reselected(); }),
+        name: "Delete", shortcut: "⌫", group: "edit", disabled: !hasSelection() },
       // Which tool is live. With no toolbar of its own this readout is the
       // only thing that says a keystroke changed the tool, and a drawing app
       // whose next click does something unexpected is an infuriating one.
@@ -1137,13 +1177,17 @@ export function renderExcalidraw(host, text, {
       // question `onDoubleClick` asks, so clicking a box with the text tool
       // binds a label to it instead of dropping free text over it.
       //
-      // A getter because this is the one field with a cost: `enclosingAt` walks
-      // the elements, and the probe is rebuilt on every pointermove to pick a
-      // cursor. Only `pointerIntent`'s text branch ever reads it, so only a
-      // press with the text tool live pays for it.
+      // Literally the same question: upstream's text tool and its double-click
+      // both call `getTextBindableContainerAtPosition` (App.tsx:9829 and :7220),
+      // and this is the port of it. When the two disagreed here, the tool was
+      // the one that got it wrong.
+      //
+      // A getter because this is the one field with a cost: the lookup walks the
+      // elements, and the probe is rebuilt on every pointermove to pick a cursor.
+      // Only `pointerIntent`'s text branch ever reads it, so only a press with
+      // the text tool live pays for it.
       get label() {
-        const index = typeTargetAt(x, y);
-        return index >= 0 && LABELABLE.has(doc.element(index)?.type) ? index : -1;
+        return labelTargetAt(x, y);
       },
       box: doc.selectionBounds(),
       handleRadius: radius,
@@ -1879,66 +1923,243 @@ export function renderExcalidraw(host, text, {
     schedule();
   };
 
-  /// The topmost element whose *box* contains a scene point, or -1.
+  // --- double-click --------------------------------------------------------
+  //
+  // A port of Excalidraw's `handleCanvasDoubleClick` (App.tsx:7039), branch for
+  // branch, minus the branches this editor has nothing to answer with — it has
+  // no groups to descend into, no line editor to open and no image cropper, and
+  // upstream's `multiElement` guard is about a mode where a line is built click
+  // by click, which is not how one is drawn here. Everything else is the same
+  // decision in the same order, because a nearly-right double-click is worse
+  // than an obviously wrong one: the hand has already learned this gesture
+  // somewhere else, and the mistakes it makes here are silent.
+  //
+  // What it used to be was three branches — text, labelable, miss — and they
+  // read the same in the common case and differently in most of the others: no
+  // tool was checked, so a double-click with the rectangle tool live typed into
+  // the canvas; an unfilled box bound a label from anywhere inside its bounding
+  // box, where upstream wants the stroke itself hit; Alt had no meaning; and a
+  // second element lying over a box did not stop the label going into the box.
+
+  /// Where the last two completed clicks landed, in client coordinates.
   ///
-  /// The companion to `hitAt`, and only ever a fallback to it. A shape with a
-  /// transparent background is hit on its stroke alone
-  /// (`crates/xd-core/src/geometry.rs:395`), which is right for selection — a
-  /// hollow box is a frame, and clicking through the hole in it selects what is
-  /// behind. It is wrong for "double-click here to label this", where the whole
-  /// interior is the target: without this, double-clicking inside an unfilled
-  /// rectangle counts as a miss and silently drops a free-floating text element
-  /// in the middle of it.
+  /// Upstream's `lastCompletedCanvasClicks` (App.tsx:725), and the guard it
+  /// feeds is not academic: `dblclick` is the browser's own idea of a double
+  /// click and its tolerance for how far the pointer may travel between the two
+  /// is generous and undocumented. A sloppy click-drag-click on the canvas can
+  /// therefore arrive here as a double-click aimed at a point neither click was
+  /// near, and text appears where nobody asked for it.
+  let clicks = [];
+
+  const onClick = (ev) => {
+    if (!onCanvas(ev)) return;
+    // Any button but the primary one abandons the sequence rather than
+    // extending it (App.tsx:4441-4444).
+    if (ev.button !== undefined && ev.button !== 0) {
+      clicks = [];
+      return;
+    }
+    clicks = [...clicks.slice(-1), { x: ev.clientX, y: ev.clientY }];
+  };
+
+  /// Whether the browser's `dblclick` describes two clicks in the same place.
   ///
-  /// Boxes rather than outlines, so a rotated ellipse is a little generous at
-  /// its corners. For choosing what to type into, generous is the right way to
-  /// be wrong.
-  const enclosingAt = (x, y) => {
+  /// `shouldHandleBrowserCanvasDoubleClick` (App.tsx:7015). Nothing recorded is
+  /// a yes — a host that never sees the clicks must not lose the gesture — and
+  /// one click recorded is a no, because the pair is incomplete.
+  const isRealDoubleClick = () => {
+    if (clicks.length === 0) return true;
+    if (clicks.length < 2) return false;
+    const [first, second] = clicks;
+    return Math.hypot(second.x - first.x, second.y - first.y) <= DOUBLE_CLICK_SLOP;
+  };
+
+  /// Excalidraw's `getTextBindableContainerAtPosition` (App.tsx:6701) — the
+  /// shape this gesture would type *inside*, or -1.
+  ///
+  /// Two rules, and the first is the surprising one: with exactly one thing
+  /// selected, that thing is the answer wherever the pointer is. So
+  /// double-clicking the box you just drew types into it even if you missed by
+  /// a hair, and with a single *non*-container selected you get free text even
+  /// where you hit a box. Upstream is unambiguous about it.
+  ///
+  /// Failing that, the topmost element whose box the point is strictly inside —
+  /// an arrow excepted, which has no meaningful inside and is asked for a real
+  /// hit on its stroke instead. The scan stops at the first element it lands in
+  /// whether or not that element can hold a label, which is what stops a label
+  /// going into a rectangle that has a photograph lying over it.
+  const bindableContainerAt = (x, y) => {
+    /// -1 unless this really is a container a label may go in. Upstream calls
+    /// `isTextBindableContainer(el, false)`, and the `false` is `includeLocked`:
+    /// a locked shape is not something to start typing into.
+    const container = (i) => {
+      const e = i >= 0 ? doc.element(i) : null;
+      return e && !e.isDeleted && e.locked !== true && LABELABLE.has(e.type) ? i : -1;
+    };
+    if (doc.selection.length === 1) return container(doc.selection[0]);
+    // One hit test for the whole scan. `hitAt` answers with the topmost element
+    // hit, and this walks the same way, so by the time an arrow is reached
+    // anything above it that was hit has already ended the loop.
+    const hit = hitAt(x, y);
     for (let i = doc.length - 1; i >= 0; i--) {
-      const element = doc.element(i);
-      if (!element || element.isDeleted || element.locked === true) continue;
-      if (!ENCLOSING.has(element.type)) continue;
+      const e = doc.element(i);
+      if (!e || e.isDeleted) continue;
+      if (e.type === "arrow") {
+        if (i === hit) return container(i);
+        continue;
+      }
+      // A frame is a region, not a shape lying over one: upstream skips it here
+      // so a box inside a frame is still reachable (App.tsx:7731-7735).
+      if (e.type === "frame") continue;
       const b = doc.elementBounds(i);
       if (!b) continue;
-      if (x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY) return i;
+      if (x > b.minX && x < b.maxX && y > b.minY && y < b.maxY) return container(i);
     }
     return -1;
   };
 
-  /// What a "type here" gesture at a scene point means: the element actually
-  /// under the pointer, and failing that the shape whose *interior* it is
-  /// inside, or -1 for open canvas.
+  /// A container's middle, as `[x, y]`, or null.
+  const centreOf = (index) => {
+    const b = doc.elementBounds(index);
+    return b ? [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2] : null;
+  };
+
+  /// `getTextWysiwygSnappedToCenterPosition` (App.tsx:13868), reduced to the one
+  /// question this asks of it: is a point near enough a container's centre that
+  /// text put there means "in this shape"?
+  const nearCentreOf = (index, x, y) => {
+    const c = centreOf(index);
+    return !!c && Math.hypot(x - c[0], y - c[1]) < TEXT_TO_CENTER_SNAP;
+  };
+
+  /// Whether a gesture at this point is aimed at the *inside* of the container
+  /// at `index`, in which case the text it makes belongs at that container's
+  /// middle rather than under the pointer.
   ///
-  /// Shared by the double-click and by the text tool, because they are the same
-  /// question asked with two different hands — and when they disagreed, the tool
-  /// was the one that got it wrong.
-  const typeTargetAt = (x, y) => {
-    const hit = hitAt(x, y);
-    return hit >= 0 ? hit : enclosingAt(x, y);
+  /// Upstream's three conditions, in its order (App.tsx:7229): a shape that
+  /// already has a label counts anywhere in its box; so does one with a real
+  /// fill; and an unfilled one counts only where the pointer landed on the shape
+  /// itself, because an empty box is a hole you click through and not a surface.
+  const aimsAtCentre = (index, x, y) => {
+    const shape = index >= 0 ? doc.element(index) : null;
+    if (!shape) return false;
+    return labelOf(index) >= 0
+      || !isTransparent(shape.backgroundColor)
+      || hitAt(x, y) === index;
+  };
+
+  /// The shape a "type here" gesture at this point would put its text *inside*,
+  /// or -1 for text of its own.
+  ///
+  /// `bindableContainerAt` is only the first half of upstream's answer. The
+  /// second is that the text still has to land near the container's middle
+  /// before it counts as that container's label — `startTextEditing`'s
+  /// `parentCenterPosition` (App.tsx:6809), which is why a click well inside an
+  /// empty box makes free text there rather than a label.
+  ///
+  /// Both halves, composed, because both gestures that can type go through the
+  /// same pair upstream: the double-click below and the text tool, through
+  /// `probe.label`. When they disagreed here, the tool was the one that got it
+  /// wrong, and the fix was to give them one function to ask.
+  const labelTargetAt = (x, y) => {
+    const index = bindableContainerAt(x, y);
+    if (index < 0) return -1;
+    const [ax, ay] = aimsAtCentre(index, x, y) ? (centreOf(index) ?? [x, y]) : [x, y];
+    return nearCentreOf(index, ax, ay) ? index : -1;
+  };
+
+  /// The text this gesture should edit when the *selection* decides it rather
+  /// than the pointer, or -1. Upstream's `getSelectedTextElement`
+  /// (App.tsx:6396).
+  ///
+  /// Only with exactly one thing selected, and then: that thing if it is text —
+  /// so a double-click anywhere goes back into the text you were just editing —
+  /// otherwise its bound label, and that second half only once a container has
+  /// been found, which is what stops a double-click on empty canvas reopening
+  /// the label of whatever happens to be selected.
+  const selectedTextFor = (container) => {
+    if (doc.selection.length !== 1) return -1;
+    const index = doc.selection[0];
+    if (doc.element(index)?.type === "text") return index;
+    return container >= 0 ? labelOf(index) : -1;
   };
 
   const onDoubleClick = (ev) => {
     if (detached || !doc || !onCanvas(ev)) return;
+    // Already typing. Upstream's first guard is `editingTextElement`, and it is
+    // not academic: the overlay is a real <textarea> lying on the canvas, and
+    // double-clicking a word is how anyone selects one.
+    if (editing) return;
+    if (!isRealDoubleClick()) return;
+    // Selection mode only (App.tsx:7063-7072, "double click only creates/edits
+    // text in selection mode"). With a shape tool live the two clicks are two
+    // draws, and a text element on top of them is not what was asked for.
+    if (tools.tool !== "select") return;
     ev.preventDefault?.();
-    const [x, y] = scenePoint(ev);
-    // Three branches, and it used to have two: text, then a *miss*. A filled
-    // rectangle fell between them — the hit succeeded and it was not text — so
-    // double-clicking one did nothing at all, no overlay and no feedback
-    // (docs/audit/audit-text.md, verdict). An unfilled one fell out the other
-    // side of the same gap and got a stray text element instead of a label.
-    const target = typeTargetAt(x, y);
-    const element = target >= 0 ? doc.element(target) : null;
-    if (element?.type === "text") {
-      doc.setSelection([target]);
+    let [x, y] = scenePoint(ev);
+
+    // Three of upstream's branches consume the gesture outright, and the reason
+    // to port them without their payloads is that consuming it *is* most of the
+    // behaviour: whatever else a double-click on one of these means, it does not
+    // mean "put a text element here", and falling through to that is the version
+    // of this that feels broken.
+    //
+    //   a single selected line, or an arrow with ⌘ held (App.tsx:7082-7095)
+    //     opens upstream's line editor. Point handles are up here as soon as one
+    //     linear element is selected, so there is no mode left to enter — but a
+    //     text element dropped in the middle of the line somebody was aiming at
+    //     is a real thing to avoid.
+    //   a single selected image (App.tsx:7163-7166)
+    //     starts upstream's crop. There is no cropper here yet.
+    //   an embeddable under the pointer (App.tsx:7196-7203)
+    //     activates the live web view it is. Those render as placeholders here.
+    const only = doc.selection.length === 1 ? doc.selection[0] : -1;
+    const onlyType = only >= 0 ? (doc.element(only)?.type ?? "") : "";
+    if (onlyType === "line" || onlyType === "image"
+      || (onlyType === "arrow" && (ev.metaKey || ev.ctrlKey))) return;
+    const under = hitAt(x, y);
+    if (under >= 0 && EMBEDDED.has(doc.element(under)?.type)) return;
+
+    // The shape this would type into, and where in it the text would go.
+    const index = bindableContainerAt(x, y);
+    const shape = index >= 0 ? doc.element(index) : null;
+    if (shape && aimsAtCentre(index, x, y)) {
+      // Only the aim moves here, not the decision — what happens at that point
+      // is settled below, and Alt still gets out of it. Upstream moves the point
+      // in the same place and for the same reason (App.tsx:7239-7245).
+      const c = centreOf(index);
+      if (c) [x, y] = c;
+    }
+
+    // Text already there wins over making any (upstream's `existingTextElement`,
+    // App.tsx:6826-6835). This is what makes a second double-click re-edit the
+    // label the first one made instead of stacking another on top of it.
+    let text = selectedTextFor(index);
+    // An arrow's label sits at the middle of the shaft rather than inside a box,
+    // so it is asked for by name rather than found under the pointer.
+    if (text < 0 && shape?.type === "arrow") text = labelOf(index);
+    if (text < 0) {
+      const hit = hitAt(x, y);
+      if (hit >= 0 && doc.element(hit)?.type === "text") text = hit;
+    }
+    if (text >= 0) {
+      const element = doc.element(text);
+      doc.setSelection([text]);
       reselected();
-      openOverlay(element, false);
+      openOverlay(element, false, null, element?.containerId || null);
       return;
     }
-    if (element && LABELABLE.has(element.type)) {
-      editLabel(target);
+
+    // A new label bound to the shape, unless Alt says otherwise.
+    // `insertAtParentCenter: !event.altKey` (App.tsx:7250) is the whole of what
+    // Alt changes — the point has already been moved to the middle above, so
+    // Alt+double-click inside a filled shape leaves an unbound text element at
+    // its centre, which is exactly what upstream does.
+    if (shape && !ev.altKey && nearCentreOf(index, x, y)) {
+      editLabel(index);
       return;
     }
-    if (target < 0) createText(x, y);
+    createText(x, y);
   };
 
   // --- the keyboard --------------------------------------------------------
@@ -2321,7 +2542,11 @@ export function renderExcalidraw(host, text, {
       `height:${box.height * scale}px`,
       `font:${fontString({ ...element, fontSize: (element.fontSize ?? 20) * scale })}`,
       `line-height:${lineHeightPx(element) * scale}px`,
-      `color:${element.strokeColor || "#1e1e1e"}`,
+      // Through the theme, like everything the painter draws. The overlay is a
+      // real <textarea> lying on the canvas while a text element is edited, so
+      // if it wore the file's literal colour the words would change colour the
+      // instant you stopped typing and the painter took over.
+      `color:${applyDarkModeFilter(element.strokeColor || "#1e1e1e", isDarkTheme())}`,
       `text-align:${align}`,
       `opacity:${opacityOf(element)}`,
       "background:transparent",
@@ -3009,8 +3234,15 @@ export function renderExcalidraw(host, text, {
         // unless both halves of a pair are supplied, so they were dark until now.
         getCanvasBackground: () => scene.appState?.viewBackgroundColor ?? "#ffffff",
         setCanvasBackground: (color) => appStateSet({ viewBackgroundColor: color }),
-        getTheme: () => (scene.appState?.theme === "dark" ? "dark" : "light"),
-        setTheme: (theme) => appStateSet({ theme }),
+        // `getTheme` without `setTheme`, which is the panel's own way of being
+        // told "read this, do not offer to change it" (see renderProps' header:
+        // a row is absent unless both halves are supplied). The panel needs to
+        // *know* the theme because every swatch in it previews a colour through
+        // the same transform the canvas paints it with; it must not *set* it,
+        // because the theme is the window's and the window's control for it is
+        // the appearance segment in the menu. Excalidraw keeps it in the
+        // hamburger menu for the same reason.
+        getTheme: paintTheme,
       });
       panel.refresh?.();
     })
@@ -3043,11 +3275,20 @@ export function renderExcalidraw(host, text, {
   };
 
   /// Every element, painted onto whatever surface is handed in.
+  ///
+  /// In the light theme, whatever the window happens to be wearing. An export
+  /// is a file that leaves this machine, and Excalidraw's own default for it is
+  /// `exportWithDarkMode: false` (appState.ts:69, export.ts:268) — the theme is
+  /// a property of the screen it was looked at on, and baking one screen's
+  /// choice into a PNG that will be opened on a hundred others is how a diagram
+  /// arrives inverted. It is also what the background below has always done, so
+  /// this is the two halves of an export finally agreeing: white paper and the
+  /// colours the file actually holds.
   const paintDocument = (ctx, rc) => {
     for (const element of doc.elements()) {
       if (!element) continue;
       try {
-        drawElement(ctx, rc, element, scene, images);
+        drawElement(ctx, rc, element, scene, images, "light");
       } catch {
         // One malformed element must not lose the whole export, the same way it
         // must not blank the whole drawing.
@@ -3120,6 +3361,7 @@ export function renderExcalidraw(host, text, {
     [wrap, "pointermove", onPointerMove, undefined],
     [wrap, "pointerup", onPointerUp, undefined],
     [wrap, "pointercancel", onPointerUp, undefined],
+    [wrap, "click", onClick, undefined],
     [wrap, "dblclick", onDoubleClick, undefined],
     [wrap, "contextmenu", onContextMenu, undefined],
     [wrap, "wheel", onWheel, { passive: false }],
@@ -3155,6 +3397,12 @@ export function renderExcalidraw(host, text, {
     : new MutationObserver(() => {
       if (detached) return;
       colors = chromeTheme(wrap);
+      // The drawing's own colours move with it now, not only the chrome's: the
+      // appearance the host just switched to is the theme `paintTheme` reads,
+      // so the canvas, the open text overlay and every swatch in the panel are
+      // all showing something one attribute out of date until they are told.
+      placeOverlay();
+      panel?.refresh?.();
       schedule();
     });
   themeWatch?.observe(wrap.ownerDocument.documentElement, {

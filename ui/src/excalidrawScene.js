@@ -383,6 +383,25 @@ export function applyDarkModeFilter(color, isDarkMode = true) {
   return out;
 }
 
+/// Excalidraw's `isTransparent` (colors.ts:373): a colour with no alpha at all.
+///
+/// Which is to say "no fill" — the thing that decides whether a shape's inside
+/// is a surface or a hole. It is what upstream asks before it will put a label
+/// in a box a double-click landed inside (App.tsx:7230): a filled box counts
+/// anywhere in it, an empty one only where the pointer touched the shape itself,
+/// because an empty box is something you click *through*.
+///
+/// Note the asymmetry, which is upstream's: the keyword `transparent` and a
+/// zero-alpha colour are transparent, and a colour nothing can parse is not.
+/// A colour we cannot read is more likely a fill we do not understand than no
+/// fill at all, and guessing "no fill" would silently stop labels working on it.
+export function isTransparent(color) {
+  const s = String(color ?? "").trim();
+  if (!s || s.toLowerCase() === "transparent") return true;
+  const rgba = parseColor(s);
+  return rgba ? rgba[3] === 0 : false;
+}
+
 /// The Rough.js options Excalidraw would have drawn this element with — a port
 /// of its generateRoughOptions(). Getting this right is most of the fidelity:
 /// the same seed with different options is still a different drawing.
@@ -470,6 +489,18 @@ export function imageDataUrl(element, files) {
   const entry = element?.fileId && files ? files[element.fileId] : null;
   const url = entry?.dataURL;
   return typeof url === "string" && url.startsWith("data:") ? url : null;
+}
+
+/// What kind of picture an image element's bytes are, lowercased, or "".
+///
+/// The painter needs it for one decision and one only — whether the dark theme
+/// applies to this image (see `drawImage`) — and it is asked of the *file map*
+/// rather than of the element, because `mimeType` is a property of the bytes.
+/// A file the map has never heard of answers "", which reads as "not an SVG"
+/// and is the right answer for a picture nobody can see.
+export function imageMimeType(element, files) {
+  const entry = element?.fileId && files ? files[element.fileId] : null;
+  return String(entry?.mimeType ?? "").trim().toLowerCase();
 }
 
 /// Where each line of a text element's baseline sits, and how to align it.

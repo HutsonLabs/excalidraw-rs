@@ -142,17 +142,6 @@ export const FONT_FAMILIES = [
 /// `appState.theme`, the two values the renderer reads
 /// (`excalidrawView.js`'s `scene?.appState?.theme === "dark"`).
 ///
-/// A document property, not a chrome preference, and the distinction is the
-/// whole reason it belongs on something that can write `appState`: Excalidraw's
-/// dark theme is a per-colour transform of the *same* file rather than a second
-/// palette, so `theme` records which way round the colours in the file are meant
-/// to be read. Getting it wrong does not merely look wrong here — it re-inverts
-/// on the way out.
-export const THEMES = [
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-];
-
 export const TEXT_ALIGNS = [
   { value: "left", label: "Left" },
   { value: "center", label: "Center" },
@@ -550,12 +539,6 @@ const ICONS = {
     triangle: svg('<path d="M3 10h10" /><path d="M13 6.5l4.5 3.5 -4.5 3.5z" fill="currentColor" />'),
     diamond: svg('<path d="M3 10h8.5" /><path d="M14.5 6l3 4 -3 4 -3 -4z" fill="currentColor" />'),
   },
-  theme: {
-    light: svg('<circle cx="10" cy="10" r="3.5" />'
-      + '<path d="M10 2.5v1.5M10 16v1.5M2.5 10h1.5M16 10h1.5" />'
-      + '<path d="M4.7 4.7l1 1M14.3 14.3l1 1M15.3 4.7l-1 1M5.7 14.3l-1 1" />'),
-    dark: svg('<path d="M15.5 11.8a6 6 0 0 1 -7.3 -7.3a6.2 6.2 0 1 0 7.3 7.3z" />'),
-  },
   textAlign: {
     left: svg('<path d="M4 6h12M4 10h8M4 14h11" />'),
     center: svg('<path d="M4 6h12M6 10h8M4.5 14h11" />'),
@@ -694,11 +677,16 @@ function ensureStylesheet() {
 /// preference for the next shape, and that shape is minted with a fresh seed.
 ///
 /// `getCanvasBackground()` / `setCanvasBackground(color)` are the canvas colour,
-/// and `getTheme()` / `setTheme(theme)` the light/dark one. Both pairs are
-/// `appState`, not a property of any element, and each row is absent unless both
-/// its accessors are supplied — a host may well prefer to put either in its own
-/// chrome (Excalidraw keeps theme in its hamburger menu), and the panel should
-/// not be the reason there are two of them.
+/// which is `appState` rather than a property of any element; the row is absent
+/// unless both accessors are supplied.
+///
+/// `getTheme()` is read-only on purpose and has no row of its own. It answers
+/// "light" or "dark" for the theme the *canvas* is being painted in, and the
+/// panel needs it because every swatch in here previews a colour through the
+/// same transform the painter uses (see `docFilter`). It is the host's to
+/// decide and the host's alone — a theme is a property of who is looking, so a
+/// second control for it down here could only ever disagree with the window's.
+/// Excalidraw keeps its own in the hamburger menu for the same reason.
 ///
 /// `actions` holds the verbs that are not style fields. Each is optional and its
 /// row is absent unless at least one member of the row is supplied, so a host
@@ -727,7 +715,7 @@ function ensureStylesheet() {
 /// one to draw.
 export function renderProps(host, {
   getStyle, setStyle, hasSelection, getKinds, activeTool, shown, reseed,
-  getCanvasBackground, setCanvasBackground, getTheme, setTheme, actions,
+  getCanvasBackground, setCanvasBackground, getTheme, actions,
 } = {}) {
   if (!host) return { refresh() {}, dispose() {} };
   ensureStylesheet();
@@ -767,22 +755,21 @@ export function renderProps(host, {
   /// sloppiness uses it, and only for `{ resketch: true }`.
   const emit = (patch, opts) => setStyle?.(patch, opts);
 
-  /// The transform the renderer will put this document's colours through, as a
-  /// CSS filter — `THEME_FILTER` for a dark-themed document, nothing for a
-  /// light one.
+  /// The transform the renderer will put this drawing's colours through, as a
+  /// CSS filter — `THEME_FILTER` in the dark theme, nothing in the light one.
   ///
   /// This is what makes the swatches honest. A colour row writes the file's
   /// value (`#1e1e1e` stays `#1e1e1e`, which is what Excalidraw would write),
-  /// but a dark-themed document is *painted* through the invert/hue-rotate pair
-  /// (`applyDarkModeFilter`), so the swatch showing the raw value is showing a
-  /// colour that appears nowhere on the canvas. Displaying the value through
-  /// the same transform the canvas uses means the square you click is the
-  /// colour you get.
+  /// but a drawing viewed in the dark theme is *painted* through the
+  /// invert/hue-rotate pair (`applyDarkModeFilter`), so a swatch showing the raw
+  /// value is showing a colour that appears nowhere on the canvas. Displaying
+  /// the value through the same transform the canvas uses means the square you
+  /// click is the colour you get.
   ///
-  /// The app's own light/dark appearance is the second half of the same
-  /// problem and is handled the same way, one level up: it filters the canvas
-  /// element in CSS, and the stylesheet hands the swatches `--xd-view-filter`
-  /// so they compose in the same order.
+  /// One transform, because there is one theme. `getTheme()` is the host's
+  /// answer to "what is this being painted in", and the host is the only thing
+  /// that gets to have an opinion — which is also why this panel reads it and
+  /// does not offer to set it.
   const docFilter = () => ((getTheme?.() ?? "light") === "dark" ? THEME_FILTER : "");
 
   /// The kinds a patch would land on, and how many things are selected. Both
@@ -1078,20 +1065,6 @@ export function renderProps(host, {
     }));
   }
 
-  // Beside the canvas colour because the two answer the same question — what
-  // the drawing sits on — and because they are the two things in this panel that
-  // are properties of the file rather than of anything in it. Nothing writes
-  // `appState.theme` today, so a document authored in dark mode reopens light
-  // and every colour in it is re-inverted.
-  if (getTheme && setTheme) {
-    add("theme", choiceGroup("Theme", "theme", THEMES, {
-      read: () => getTheme() ?? "light",
-      write: (value) => value,
-      send: (value) => setTheme(value),
-      icons: ICONS.theme,
-    }));
-  }
-
   add("fill", choiceGroup("Fill", "fillStyle", FILL_STYLES, { icons: ICONS.fill }));
 
   add("strokeWidth", choiceGroup("Stroke width", "strokeWidth", STROKE_WIDTHS, {
@@ -1264,10 +1237,9 @@ export function renderProps(host, {
     show("fontFamily", applies.text);
     show("textAlign", applies.text);
     show("verticalAlign", applies.text);
-    // The canvas colour and the theme are properties of the drawing, not of the
-    // selection, so they are the rows nothing about the selection can hide.
+    // The canvas colour is a property of the drawing, not of the selection, so
+    // it is the one row nothing about the selection can hide.
     show("canvas", true);
-    show("theme", true);
     // The verbs need something to act on. With nothing selected the panel is
     // showing defaults for the next shape, and there is nothing to reorder.
     for (const name of ["layers", "align", "flip", "grouping"]) show(name, selected);

@@ -52,7 +52,8 @@ import { getStroke } from "../vendor/perfect-freehand/perfect-freehand.esm.js";
 import { div, el } from "./dom.js";
 import {
   sceneBounds, fitTransform, roughOptions, cornerRadius, cornerRadiusFor, opacityOf,
-  imageDataUrl, fontString, textLayout, isDrawn, applyDarkModeFilter,
+  imageDataUrl, imageMimeType, fontString, textLayout, isDrawn, applyDarkModeFilter,
+  THEME_FILTER,
 } from "./excalidrawScene.js";
 
 const MIN_SCALE = 0.05;
@@ -290,7 +291,7 @@ export function renderExcalidrawCanvas(host, scene, { onActions } = {}) {
 /// ui/test/excalidrawDraw.test.js against a recording context — this file can't
 /// otherwise be tested without a real canvas, and a typo in a rarely-hit shape
 /// would only ever show up as a missing element in someone's diagram.
-export function drawElement(ctx, rc, element, scene, images) {
+export function drawElement(ctx, rc, element, scene, images, theme) {
   // Deleted elements stay in the file — Excalidraw keeps them for undo and for
   // merging another client's edits — and must not be drawn. `parseScene` strips
   // them on the read path, but the editor paints straight from the live
@@ -298,9 +299,15 @@ export function drawElement(ctx, rc, element, scene, images) {
   if (element?.isDeleted) return;
 
   // Excalidraw's dark theme is a per-colour transform of the *same* file, not a
-  // second palette, so the theme it was last viewed in is the theme its colours
-  // have to be filtered for (shape.ts:222, :236).
-  const isDarkMode = scene?.appState?.theme === "dark";
+  // second palette, so the theme it is being *viewed* in is the theme its
+  // colours have to be filtered for (shape.ts:222, :236).
+  //
+  // `theme` is that answer when the caller has one — the editor's, which takes
+  // it from the app's appearance rather than from the file, because a theme is
+  // a property of who is looking. A caller with no opinion falls back to the
+  // theme the file was last saved in, which is what a read-only pane wants and
+  // what this file did before there was an editor to disagree with it.
+  const isDarkMode = (theme ?? scene?.appState?.theme) === "dark";
 
   ctx.save();
   ctx.globalAlpha = opacityOf(element);
@@ -329,7 +336,7 @@ export function drawElement(ctx, rc, element, scene, images) {
     case "arrow": drawLinear(ctx, rc, element, isDarkMode); break;
     case "freedraw": drawFreedraw(ctx, element, isDarkMode); break;
     case "text": drawText(ctx, element, isDarkMode); break;
-    case "image": drawImage(ctx, element, scene, images); break;
+    case "image": drawImage(ctx, element, scene, images, isDarkMode); break;
     case "frame": drawFrame(ctx, element); break;
     default: drawPlaceholder(ctx, element); break;
   }
@@ -672,13 +679,35 @@ function drawText(ctx, element, isDarkMode) {
   for (const line of lines) if (line.text) ctx.fillText(line.text, line.x, line.y);
 }
 
-function drawImage(ctx, element, scene, images) {
+/// A picture, at its true colours.
+///
+/// The dark theme deliberately stops at the edge of an image. Every *drawn*
+/// thing in a scene goes through the invert/hue-rotate pair, because a stroke
+/// is a colour someone chose out of a palette and the palette is what the
+/// theme restates — but a photograph is not a palette, and a photograph that
+/// inverted with the theme would be a different photograph. Upstream draws the
+/// same line: `renderElement.ts:400-404` computes `shouldInvertImage` and the
+/// image is drawn unfiltered unless it says otherwise.
+///
+/// What it says otherwise for is exactly one case, and it is upstream's too: an
+/// SVG. An `.svg` dropped into a drawing is almost always line art authored in
+/// black on nothing, so it is the one kind of image that *is* a palette, and it
+/// goes through the same filter the strokes did.
+///
+/// `drawElement` has already saved the context, so the filter is scoped to this
+/// element whatever happens; clearing it here as well is for the benefit of a
+/// context whose save/restore does not carry `filter` — an offscreen canvas in
+/// an older engine, and the export path uses one.
+function drawImage(ctx, element, scene, images, isDarkMode) {
   const img = images.get(element.fileId);
   if (!img) {
     drawPlaceholder(ctx, element, "image");
     return;
   }
+  const invert = isDarkMode && imageMimeType(element, scene?.files) === "image/svg+xml";
+  if (invert) ctx.filter = THEME_FILTER;
   ctx.drawImage(img, element.x, element.y, element.width, element.height);
+  if (invert) ctx.filter = "none";
 }
 
 function drawFrame(ctx, element) {

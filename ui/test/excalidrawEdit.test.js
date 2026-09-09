@@ -415,7 +415,16 @@ const move = (wrap, x, y, extra = {}) => wrap.dispatch("pointermove", {
 const lift = (wrap, x, y) => wrap.dispatch("pointerup", {
   pointerId: 1, clientX: x + PAD, clientY: y + PAD,
 });
-const dbl = (wrap, x, y) => wrap.dispatch("dblclick", { clientX: x + PAD, clientY: y + PAD });
+const dbl = (wrap, x, y, extra = {}) => wrap.dispatch("dblclick", {
+  clientX: x + PAD, clientY: y + PAD, altKey: false, metaKey: false, ctrlKey: false, ...extra,
+});
+/// The `click` a browser sends after each completed press, which is what the
+/// double-click guard counts. `dbl` alone leaves the tally empty, and an empty
+/// tally is "cannot tell, allow it" — so only the tests that are *about* the
+/// guard have to send these.
+const click = (wrap, x, y, extra = {}) => wrap.dispatch("click", {
+  button: 0, clientX: x + PAD, clientY: y + PAD, ...extra,
+});
 const rightClick = (wrap, x, y) => wrap.dispatch("contextmenu", { clientX: x + PAD, clientY: y + PAD });
 const type = (wrap, key, extra = {}) => wrap.dispatch("keydown", {
   key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...extra,
@@ -522,6 +531,130 @@ test("double-clicking a shape that already has a label edits that label", async 
   expect(textsOf()).toHaveLength(1);
 });
 
+test("a double-click away from the centre of an unfilled shape is free text", async () => {
+  // Upstream's rule, composed out of two of its own steps: an unfilled shape only
+  // counts as a container where the pointer actually hit *it* (App.tsx:7231), and
+  // failing that the text is bound only if the point is within
+  // TEXT_TO_CENTER_SNAP_THRESHOLD of the middle (App.tsx:13888). Neither holds
+  // here, so this is text at the pointer, owned by nobody — which is what makes
+  // an empty box something you can write next to as well as inside.
+  const { wrap } = await mount({ text: sceneOf(shape({ id: "a", x: 0, y: 0, width: 200, height: 100 })) });
+  // Clear of every edge by more than HIT_SLOP, so the stroke is genuinely missed,
+  // and 45 units from the centre, so the snap does not reach either.
+  dbl(wrap, 60, 30);
+  write(wrap, "beside");
+  const [text] = textsOf();
+  expect(text.containerId).toBeUndefined();
+  expect(live.element(0).boundElements ?? []).toEqual([]);
+  expect(text.x).toBeCloseTo(60, 6);
+});
+
+test("Alt keeps the free-text escape hatch inside a filled shape", async () => {
+  // `insertAtParentCenter: !event.altKey` (App.tsx:7250) is the whole of what Alt
+  // changes, and the detail worth pinning is what it does *not* change: the point
+  // has already been moved to the shape's middle by then, so Alt leaves an
+  // unbound text element at the centre rather than one where the pointer was.
+  const { wrap } = await mount({
+    text: sceneOf(shape({ id: "a", width: 200, height: 100, backgroundColor: "#ffc9c9" })),
+  });
+  dbl(wrap, 40, 20, { altKey: true });
+  write(wrap, "loose");
+  const [text] = textsOf();
+  expect(text.containerId).toBeUndefined();
+  expect(live.element(0).boundElements ?? []).toEqual([]);
+  // At the centre, not at the pointer — free text grows from its top-left corner,
+  // and the corner is where the aim was moved to.
+  expect(text.x).toBeCloseTo(100, 6);
+});
+
+test("a shape with something lying over it is not typed into", async () => {
+  // The scan stops at the first element whose box the point is inside, bindable or
+  // not (App.tsx:7711-7739), and answers null when that element cannot hold a
+  // label. So a photograph over a box protects the box: the label would have gone
+  // underneath the thing the user was looking at.
+  const { wrap } = await mount({
+    text: sceneOf(
+      shape({ id: "a", width: 200, height: 100, backgroundColor: "#ffc9c9" }),
+      shape({ id: "p", type: "image", fileId: "f", x: 20, y: 10, width: 160, height: 80 }),
+    ),
+  });
+  dbl(wrap, 100, 50);
+  write(wrap, "over");
+  const [text] = textsOf();
+  expect(text.containerId).toBeUndefined();
+  expect(live.element(0).boundElements ?? []).toEqual([]);
+});
+
+test("a locked shape is not typed into", async () => {
+  // `isTextBindableContainer(el, false)` — the `false` is `includeLocked`. A
+  // locked shape is transparent to the pointer, so the gesture means what it
+  // would have meant on empty canvas.
+  const { wrap } = await mount({
+    text: sceneOf(shape({ id: "a", width: 200, height: 100, backgroundColor: "#ffc9c9", locked: true })),
+  });
+  dbl(wrap, 100, 50);
+  write(wrap, "not a label");
+  expect(textsOf()[0].containerId).toBeUndefined();
+  expect(live.element(0).boundElements ?? []).toEqual([]);
+});
+
+test("one selected container takes the double-click wherever it lands", async () => {
+  // The first rule in `getTextBindableContainerAtPosition` (App.tsx:6704-6708),
+  // and the surprising one: with exactly one bindable thing selected, that is the
+  // answer regardless of where the pointer is. It is what makes typing into the
+  // box you just drew reliable rather than a matter of aim.
+  const { wrap } = await mount({
+    text: sceneOf(shape({ id: "a", width: 100, height: 60, backgroundColor: "#ffc9c9" })),
+  });
+  live.setSelection([0]);
+  dbl(wrap, 400, 400); // empty canvas, nowhere near the shape
+  write(wrap, "mine");
+  const [text] = textsOf();
+  expect(text.containerId).toBe("a");
+});
+
+test("a double-click with a shape tool live is not a text gesture", async () => {
+  // "double click only creates/edits text in selection mode" (App.tsx:7063-7072).
+  // With a shape tool held the two clicks are two draws, and a text element on
+  // top of them is not what the hand asked for — this editor used to make one.
+  const { wrap } = await mount({ text: sceneOf(shape({ id: "a", backgroundColor: "#ffc9c9" })) });
+  for (const key of ["r", "o", "d", "l", "a", "p", "e", "h"]) {
+    type(wrap, key);
+    dbl(wrap, 50, 30);
+    expect(overlayOf(wrap)).toBeUndefined();
+    expect(textsOf()).toHaveLength(0);
+  }
+});
+
+test("two clicks far apart are not a double-click, whatever the browser says", async () => {
+  // `shouldHandleBrowserCanvasDoubleClick` (App.tsx:7015). The browser's own
+  // tolerance for how far the pointer may travel between the two clicks is
+  // generous and undocumented, so a click-drag-click across the canvas can arrive
+  // as a double-click aimed at a point neither click was near.
+  const { wrap } = await mount();
+  click(wrap, 0, 0);
+  click(wrap, 200, 200);
+  dbl(wrap, 200, 200);
+  expect(overlayOf(wrap)).toBeUndefined();
+  expect(textsOf()).toHaveLength(0);
+
+  // The same two clicks in the same place are the real thing.
+  click(wrap, 200, 200);
+  dbl(wrap, 200, 200);
+  expect(overlayOf(wrap)).toBeDefined();
+});
+
+test("a double-click inside the overlay stays in the overlay", async () => {
+  // Upstream's first guard is `editingTextElement`, and it earns its place: the
+  // overlay is a real <textarea> on the canvas, and double-clicking a word is how
+  // anyone selects one. A second edit started underneath would abandon the first.
+  const { wrap } = await mount();
+  dbl(wrap, 300, 300);
+  expect(textsOf()).toHaveLength(1);
+  dbl(wrap, 300, 300);
+  expect(textsOf()).toHaveLength(1);
+});
+
 test("double-clicking committed text still edits it", async () => {
   // The path the user reported broken, which was in fact working and untested.
   const { wrap } = await mount({
@@ -621,6 +754,26 @@ test("Enter on a selected shape types into it", async () => {
   lift(wrap, 50, 30);
   type(wrap, "Enter");
   expect(overlayOf(wrap)).toBeDefined();
+});
+
+test("the text tool and the double-click answer 'type where?' the same way", async () => {
+  // Upstream asks one function (`getTextBindableContainerAtPosition`) from both
+  // gestures and then applies the same centre-snap to both, so they cannot
+  // disagree. They did here: the tool used a looser rule than the double-click,
+  // and the looser one is the one that put a label on a box the user had not
+  // aimed at.
+  // The same point the double-click test above uses: well inside an unfilled
+  // box, clear of its stroke, and 45 units from its centre. The double-click
+  // makes free text there; so must the tool.
+  const { wrap } = await mount({ text: sceneOf(shape({ id: "a", x: 0, y: 0, width: 200, height: 100 })) });
+  type(wrap, "t"); // the text tool
+  press(wrap, 60, 30);
+  lift(wrap, 60, 30);
+  write(wrap, "elsewhere");
+  const [text] = textsOf();
+  expect(text.containerId).toBeUndefined();
+  expect(live.element(0).boundElements ?? []).toEqual([]);
+  expect(text.x).toBeCloseTo(60, 6);
 });
 
 test("a label typed into a shape is bound to it, not left floating beside it", async () => {
@@ -841,6 +994,19 @@ test("a line, an image and a frame are not offered a label", async () => {
   expect(textsOf()).toHaveLength(0);
   expect(overlayOf(wrap)).toBeUndefined();
   expect(live.selection).toEqual([0]);
+});
+
+test("a selected image swallows the double-click rather than growing a caption", async () => {
+  // Upstream's is the entry to its image cropper (App.tsx:7163-7166) and returns.
+  // There is no cropper here yet, and the half worth having anyway is the return:
+  // a text element dropped over the picture is not what double-clicking one means.
+  const { wrap } = await mount({
+    text: sceneOf(shape({ id: "p", type: "image", fileId: "f", width: 200, height: 120 })),
+  });
+  live.setSelection([0]);
+  dbl(wrap, 100, 60);
+  expect(overlayOf(wrap)).toBeUndefined();
+  expect(textsOf()).toHaveLength(0);
 });
 
 test("an arrow is labelable, because bindLabel accepts one", async () => {
@@ -1305,18 +1471,26 @@ test("with a grid on, a drag lands on it", async () => {
   expect(live.element(0).x).toBe(40);
 });
 
-test("the panel can set the canvas colour and the theme", async () => {
-  // Both rows are absent unless a host wires both halves, so they were on screen
-  // and dark until `setAppState` existed.
+test("the panel can set the canvas colour, and offers no theme of its own", async () => {
+  // The canvas row is absent unless a host wires both halves, so it was on
+  // screen and dark until `setAppState` existed.
+  //
+  // The theme is the other half of that story and went the other way. It is a
+  // property of who is looking, not of the file, so the window owns it — one
+  // control, the appearance segment in the menu — and the panel is wired to read
+  // it and nothing more. Two controls for it meant a drawing could be dark in
+  // the sidebar's opinion and light in the window's, and an image on the canvas
+  // could not opt out of the window's half at all.
   const { wrap } = await mount();
   // The panel takes itself off screen entirely with the select tool live and
   // nothing selected, so there has to be something selected to look at it.
   press(wrap, 0, 30);
   lift(wrap, 0, 30);
-  const dark = panelButton(wrap, "Theme: Dark");
-  expect(dark).toBeDefined();
-  dark.dispatch("click", {});
-  expect(live.appState().theme).toBe("dark");
+  expect(panelButton(wrap, "Theme: Dark")).toBe(null);
+  const white = panelButton(wrap, "Canvas: White");
+  expect(white).toBeDefined();
+  white.dispatch("click", {});
+  expect(live.appState().viewBackgroundColor).toBe("#ffffff");
   expect(live.__calls.filter((c) => c[0] === "setAppState").length).toBeGreaterThan(0);
 });
 

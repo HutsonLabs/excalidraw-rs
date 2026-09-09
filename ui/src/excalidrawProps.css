@@ -203,29 +203,31 @@
    shown the way the *canvas* will show it, and the button's border and
    selected ring must not come along.
  *
- * Two transforms can stand between a stored colour and the pixels a user
- * sees, and a swatch that skips either is a swatch that promises a colour the
- * drawing will not have:
+ * One transform stands between a stored colour and the pixels a user sees, and
+ * a swatch that skips it is a swatch that promises a colour the drawing will
+ * not have:
  *
- *   --xd-doc-filter   the document's own dark theme, which Excalidraw defines
- *                     as a per-colour invert/hue-rotate of the same file
- *                     (excalidrawScene.js `applyDarkModeFilter`). Set by the
- *                     panel from `getTheme()`.
- *   --xd-view-filter  the app's light/dark appearance, which filters the
- *                     canvas element itself. Set by whatever stylesheet owns
- *                     that decision — in this app, styles.css beside the rule
- *                     that filters `.xd-canvas`.
+ *   --xd-doc-filter   the theme the canvas is painted in, which Excalidraw
+ *                     defines as a per-colour invert/hue-rotate of the same
+ *                     file (excalidrawScene.js `applyDarkModeFilter`). Set by
+ *                     the panel from `getTheme()`.
  *
- * Same two, in the same order the canvas applies them, so the fill and the
- * drawing cannot disagree. `brightness(1)` is the fallback for each because it
- * is the identity filter: neither variable is set in the ordinary case, and a
- * declaration that is always a valid filter list is worth more here than one
- * that leans on an empty `var()` fallback collapsing the property. */
+ * There used to be a second one. The app inverted the whole canvas element in
+ * CSS for its dark appearance, so a swatch had to compose that filter with the
+ * document's — and an image on the canvas had no way to opt out of a filter
+ * applied to the element it was drawn on, which is why photographs came out
+ * inverted. The appearance now feeds the painter instead, so there is one
+ * transform, in one place, and `--xd-doc-filter` is all of it.
+ *
+ * `brightness(1)` is the fallback because it is the identity filter: the
+ * variable is unset in the ordinary case, and a declaration that is always a
+ * valid filter list is worth more here than one that leans on an empty `var()`
+ * fallback collapsing the property. */
 .xdp-fill {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  filter: var(--xd-doc-filter, brightness(1)) var(--xd-view-filter, brightness(1));
+  filter: var(--xd-doc-filter, brightness(1));
 }
 
 /* The selected colour is marked with a ring *outside* the swatch rather than a

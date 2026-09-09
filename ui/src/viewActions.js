@@ -33,6 +33,13 @@
 // it is deliberate: the view offers `Save now` because a pane header should
 // show it, and the app leaves it out because the app has a File section with a
 // Save of its own that also knows what to do when there is no path yet.
+//
+// The mirror of it holds here: a descriptor with neither `icon` nor `label` is
+// not a *row* entry. A row entry is a button with a picture or two characters on
+// it, and there are verbs a menu should carry that no titlebar should — "Select
+// all", "Delete" — so they are published with a `name` and nothing to draw. Both
+// halves of the same rule: each host is offered everything and takes what it can
+// show, rather than the view keeping two lists that can disagree.
 import { el } from "./dom.js";
 import { setPressed } from "./a11y.js";
 
@@ -78,6 +85,9 @@ export function renderActions(host, list = []) {
   const seen = new Set();
   for (const a of list) {
     if (a?.id == null || seen.has(a.id)) continue;
+    // Nothing to draw on it: a menu-only verb. Skipped rather than rendered as
+    // an empty button, which is what it used to become.
+    if (a.kind !== "status" && !a.icon && !a.label) continue;
     seen.add(a.id);
     let e = els.get(a.id);
     if (!e) {

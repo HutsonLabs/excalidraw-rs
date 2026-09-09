@@ -468,12 +468,9 @@ function mount(initial = {}, {
         canvasColor = c;
       },
     }),
-    ...(theme == null ? {} : {
-      getTheme: () => themeNow,
-      setTheme: (t) => {
-        themeNow = t;
-      },
-    }),
+    // Read-only, as the panel's contract is: the theme belongs to the host and
+    // the panel only previews colours through it.
+    ...(theme == null ? {} : { getTheme: () => themeNow }),
     actions,
   });
   return {
@@ -484,6 +481,9 @@ function mount(initial = {}, {
     style: () => style,
     canvas: () => canvasColor,
     theme: () => themeNow,
+    setTheme: (t) => {
+      themeNow = t;
+    },
     set: (next) => {
       style = { ...style, ...next };
       list = null;
@@ -674,7 +674,7 @@ test("a swatch shows its colour on a child, not on the button", () => {
   m.panel.dispose();
 });
 
-test("a dark-themed document previews its colours the way it will paint them", () => {
+test("a dark-themed drawing previews its colours the way it will paint them", () => {
   // The value written to the file does not change — #1e1e1e is still #1e1e1e,
   // which is what Excalidraw writes — but a dark theme paints every colour
   // through invert/hue-rotate, so a swatch showing the raw value advertises a
@@ -683,7 +683,9 @@ test("a dark-themed document previews its colours the way it will paint them", (
   expect(m.root().style.getPropertyValue("--xd-doc-filter")).toBe(THEME_FILTER);
   expect(fillOf(byLabel(m.root(), "Stroke: Black")).style.background).toBe("#1e1e1e");
 
-  fire(byLabel(m.root(), "Theme: Light"), "click");
+  // The host switching theme under the panel — which is the only way it ever
+  // changes, since the panel has no control for it.
+  m.setTheme("light");
   m.panel.refresh();
   expect(m.root().style.getPropertyValue("--xd-doc-filter")).toBe("");
   m.panel.dispose();
@@ -1117,37 +1119,17 @@ test("the canvas row survives a selection that hides everything else", () => {
 
 // --- Theme -------------------------------------------------------------------
 
-test("the theme row is absent until a host can write appState.theme", () => {
-  const bare = mount();
-  expect(byClass(bare.root(), "xdp-label").map((n) => n.textContent)).not.toContain("Theme");
-  bare.panel.dispose();
-
-  const wired = mount({}, { theme: "light" });
-  expect(byClass(wired.root(), "xdp-label").map((n) => n.textContent)).toContain("Theme");
-  wired.panel.dispose();
-});
-
-test("the theme row writes appState, not a style patch", () => {
-  // `theme` is not a style key. Through setStyle it would be written onto every
-  // selected element, which is a field Excalidraw would never put there.
-  const m = mount({}, { theme: "light", kinds: ["rectangle"] });
-  expect(byLabel(m.root(), "Theme: Light").getAttribute("aria-pressed")).toBe("true");
-
-  fire(byLabel(m.root(), "Theme: Dark"), "click");
-  expect(m.theme()).toBe("dark");
-  expect(m.patches).toEqual([]);
-
-  m.panel.refresh();
-  expect(byLabel(m.root(), "Theme: Dark").getAttribute("aria-pressed")).toBe("true");
-  expect(byLabel(m.root(), "Theme: Light").getAttribute("aria-pressed")).toBe("false");
-  m.panel.dispose();
-});
-
-test("a document with no theme reads as light, and the row still shows", () => {
-  // The renderer treats anything but "dark" as light, so that is what is pressed.
-  const m = mount({}, { theme: "light", kinds: ["text"] });
-  expect(groupNamed(m.root(), "Theme").hidden).toBe(false);
-  m.panel.dispose();
+test("the panel offers no theme control, however much it knows about the theme", () => {
+  // A theme is a property of who is looking, so the window owns it and there is
+  // one control for it — the appearance segment in the app's menu. A second one
+  // down here could only ever disagree with the first, and did: the sidebar wrote
+  // `appState.theme` while the window filtered the canvas in CSS, so a drawing
+  // could be dark twice over. The panel reads the theme and shows no row for it.
+  for (const theme of [null, "light", "dark"]) {
+    const m = mount({}, theme == null ? {} : { theme, kinds: ["rectangle"] });
+    expect(byClass(m.root(), "xdp-label").map((n) => n.textContent)).not.toContain("Theme");
+    m.panel.dispose();
+  }
 });
 
 test("dispose() leaves the host empty and no listener alive", () => {

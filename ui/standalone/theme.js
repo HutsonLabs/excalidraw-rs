@@ -103,6 +103,39 @@ function setNativeTheme(pref) {
   } catch { /* not fatal: the window is already wearing the right colours */ }
 }
 
+/// Everyone who wants to know when the appearance changed.
+///
+/// There are two controls for it now — the segmented control below and the
+/// Appearance submenu in the macOS menu bar — and a change made in either has
+/// to show in the other, or the menu grows a tick beside a mode the window is
+/// not in. A `Set` rather than a second `installAppearance` argument because the
+/// number of listeners is not the control's business: the native menu is
+/// installed from the shell, long after and somewhere else entirely.
+const watchers = new Set();
+
+/// Be told when the appearance changes.
+///
+///   onAppearanceChange(fn) -> off
+///
+/// `fn` is called after the change has been applied, so `appearance()` and
+/// `resolveTheme()` already answer with the new mode. It fires for a change made
+/// anywhere, including the system switching under a window that is following it.
+export function onAppearanceChange(fn) {
+  if (typeof fn !== "function") return () => {};
+  watchers.add(fn);
+  return () => watchers.delete(fn);
+}
+
+const announce = () => {
+  // A copy, so a watcher that unsubscribes itself while being called does not
+  // make the set shift under the iteration.
+  for (const fn of [...watchers]) {
+    try {
+      fn(appearance());
+    } catch { /* one bad listener must not stop the others being told */ }
+  }
+};
+
 /// Choose a mode. Exported because the keyboard should be able to reach this
 /// without going through the buttons.
 export function setAppearance(pref) {
@@ -111,6 +144,7 @@ export function setAppearance(pref) {
     globalThis.localStorage?.setItem(KEY, next);
   } catch { /* the choice still applies to this session */ }
   apply(next);
+  announce();
   return next;
 }
 
@@ -170,10 +204,10 @@ export function installAppearance(host) {
       b.title = mode === "system" ? "Match the system appearance" : `${name} appearance`;
       b.setAttribute("aria-label", name);
       b.innerHTML = svg(ICONS[mode]);
-      const click = () => {
-        setAppearance(mode);
-        paint();
-      };
+      // `paint` is not called here: `setAppearance` announces, and the
+      // subscription below repaints. One path, so a change made in the menu bar
+      // and a change made with this button land the same way.
+      const click = () => setAppearance(mode);
       b.addEventListener("click", click);
       offs.push(() => b.removeEventListener("click", click));
       group.appendChild(b);
@@ -200,12 +234,16 @@ export function installAppearance(host) {
   const mq = globalThis.matchMedia?.("(prefers-color-scheme: light)");
   const onSystem = () => {
     apply(appearance());
-    paint();
+    announce();
   };
   if (mq?.addEventListener) {
     mq.addEventListener("change", onSystem);
     offs.push(() => mq.removeEventListener("change", onSystem));
   }
+
+  // Someone else changed it — the Appearance submenu in the menu bar, or the
+  // system, through the listener above.
+  offs.push(onAppearanceChange(paint));
 
   // The bootstrap script in index.html has already set data-theme from the
   // same preference; this re-applies it to pick up the two things that script

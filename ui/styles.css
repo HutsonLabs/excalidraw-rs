@@ -442,57 +442,49 @@ body {
 .xd-wrap:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .xd-canvas { display: block; }
 
-/* Dark mode, for the drawing itself.
+/* Dark mode, for the drawing itself — and where it is *not* done.
  *
- * The canvas is filled with the *scene's* background — the colour saved in the
- * file, almost always white — and that is not something the app gets to
- * overrule: a diagram authored on white and then recoloured by whoever opened
- * it is a diagram that lies about what it is. Which left the app dark and the
- * drawing a white rectangle in the middle of it, and that is the complaint
- * this rule answers.
+ * There used to be a rule here that put `invert(93%) hue-rotate(180deg)` on
+ * `.xd-canvas`, so the app's dark appearance inverted the drawing wholesale.
+ * It is gone, and the reason is worth keeping, because the rule looked right:
+ * it is Excalidraw's own filter, and a canvas filled with the file's white
+ * background is genuinely a white rectangle in the middle of a dark window.
  *
- * So the file keeps its colours and the *presentation* is inverted, which is
- * exactly what Excalidraw does for its own dark theme and is the same filter
- * it uses. `invert` alone would turn every hue into its opposite; the
- * 180-degree hue rotation turns them back, so a red arrow stays red and only
- * the lightness flips. Nothing is written to the document and exporting is
- * unaffected — this is a filter on one element.
+ * A filter on the canvas *element* applies to every pixel drawn on it, and a
+ * photograph is not a colour someone picked out of a palette. Dropping a
+ * picture into a drawing and having it come back as its own negative is not a
+ * theme, it is damage — and there is no CSS for "all of this except that".
  *
- * The chrome the editor paints on the same canvas goes through it too, and
- * comes out right for the same reason the drawing does: the selection violet
- * stays violet, and the handles — filled with --bg, which is dark in this
- * theme — invert to the light grey that a handle on a dark canvas wants to be.
+ * Excalidraw hit the same wall and moved the same way (its
+ * renderer/interactiveScene.ts says so in as many words: the CSS filter is
+ * gone, the colours are mapped in JS instead). So the appearance now reaches
+ * the painter — `paintTheme()` in excalidrawEdit.js reads `data-theme` from
+ * this very element — and every colour goes through `applyDarkModeFilter` on
+ * its way to the canvas, one at a time, where an image can be left alone.
  *
- * The text overlay is a real <textarea> sitting over the canvas while a text
- * element is being edited, so it needs the same filter or the words change
- * colour the instant you stop typing. */
-:root[data-theme="dark"] {
-  --xd-view-filter: invert(93%) hue-rotate(180deg);
-}
-
-:root[data-theme="dark"] .xd-canvas,
-:root[data-theme="dark"] .xd-text-overlay {
-  filter: var(--xd-view-filter);
-}
-
-/* The same filter, spelled once and inherited, is also what makes the colour
- * UI honest. A swatch showing the value in the file rather than the colour on
+ * Two things that used to ride on the deleted rule and now do it themselves:
+ * the text overlay, a real <textarea> over the canvas while a text element is
+ * edited, is given its colour already filtered; and the editor's chrome —
+ * selection outlines, handles — is painted from tokens that are already the
+ * right side of the theme.
+ *
+ * What is left is the colour UI, which has to *preview* a colour rather than
+ * paint it. A swatch showing the value in the file rather than the colour on
  * the canvas is the "why is my black stroke white?" bug: you pick black, the
  * canvas inverts, and nothing in the sidebar ever said so. So every surface
- * that *previews* a colour reads the same variable and comes out matching, and
- * the picker's pad and chip do too — the colour under your thumb is the colour
- * you get.
+ * that previews a colour reads `--xd-doc-filter` — the panel sets it from the
+ * same theme the painter uses — and comes out matching. The picker's pad and
+ * chip do too, so the colour under your thumb is the colour you get.
  *
  * Only the colour surfaces, never the popover itself: an inverted popover
  * would be a light panel in a dark app. `.cp-alpha` keeps its checkerboard
  * unfiltered for the same reason — it stands for "nothing here", not for a
- * colour in the drawing. The document's own dark theme composes with this
- * through `--xd-doc-filter`; see excalidrawProps.css. */
+ * colour in the drawing. See excalidrawProps.css for the swatch half. */
 .cp-sv,
 .cp-hue,
 .cp-alpha .cp-fill,
 .cp-chip-fill {
-  filter: var(--xd-doc-filter, brightness(1)) var(--xd-view-filter, brightness(1));
+  filter: var(--xd-doc-filter, brightness(1));
 }
 
 /* What a view says when it cannot show the file — a bad parse, an empty

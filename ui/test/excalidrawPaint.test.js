@@ -34,7 +34,7 @@ import {
 import { openDoc as openReal } from "./wasmHarness.js";
 import { renderExcalidraw } from "../src/excalidrawEdit.js";
 import { drawElement } from "../src/excalidrawView.js";
-import { roughOptions } from "../src/excalidrawScene.js";
+import { roughOptions, THEME_FILTER } from "../src/excalidrawScene.js";
 
 // --- a scene with one of everything ------------------------------------------
 //
@@ -277,6 +277,27 @@ test("a dark-themed drawing paints a dark-themed background", async () => {
   expect(c.calls.some((call) => call[0] === "set:fillStyle" && call[1] === "#121212")).toBe(true);
   expect(c.calls.some((call) => call[0] === "set:fillStyle" && call[1] === "#ffffff")).toBe(false);
   dispose();
+});
+
+test("the window's appearance is the theme the drawing is painted in", async () => {
+  // The one theme control is the appearance segment in the app's menu, and what
+  // it produces is `data-theme` on <html>. So a light-themed file looked at in a
+  // dark window is painted dark: Excalidraw's dark theme is a transform of the
+  // same file rather than a second palette, which makes the theme a property of
+  // who is looking. The sidebar used to hold a second control writing
+  // `appState.theme`, and the two could disagree.
+  document.documentElement.dataset.theme = "dark";
+  const { dispose } = await mount(JSON.stringify({
+    type: "excalidraw",
+    version: 2,
+    elements: [],
+    appState: { viewBackgroundColor: "#ffffff", theme: "light" },
+    files: {},
+  }));
+  const c = paintFrame();
+  expect(c.calls.some((call) => call[0] === "set:fillStyle" && call[1] === "#121212")).toBe(true);
+  dispose();
+  delete document.documentElement.dataset.theme;
 });
 
 // --- the chrome half ---------------------------------------------------------
@@ -738,6 +759,67 @@ test("dark mode filters the colours that reach the canvas, not just the chrome",
     type: "freedraw", points: [[0, 0], [10, 12], [24, 30], [40, 40]],
   }), dark).ctx;
   expect(free.calls.some((c) => c[0] === "set:fillStyle" && c[1] === "#d3d3d3")).toBe(true);
+});
+
+// --- images, which the theme leaves alone ------------------------------------
+//
+// The bug these are here for: the app used to invert its whole canvas element
+// in CSS for the dark appearance, and a filter on a canvas applies to every
+// pixel drawn on it. Adding a photograph to a drawing in dark mode therefore
+// produced the photograph's negative, with no way to opt out — which is why the
+// theme reaches the painter now, one colour at a time, and why an image is a
+// case in `drawImage` rather than a pixel like any other.
+
+/// An image element and the file map entry its bytes came from, wired to a
+/// stand-in for the decoded picture. `drawImage` only ever passes the thing
+/// through to the context, so an object is as good as an `HTMLImageElement`.
+const imageScene = (mimeType, theme) => {
+  const img = { natural: true };
+  const element = shape({ type: "image", id: "pic", fileId: "f1", width: 100, height: 60 });
+  const scene = { appState: { theme }, files: { f1: { mimeType, dataURL: "data:," } } };
+  const ctx = recorder();
+  drawElement(ctx, roughRecorder(), element, scene, new Map([["f1", img]]));
+  return { ctx, img };
+};
+
+const filtersUsed = (ctx) => ctx.calls.filter((c) => c[0] === "set:filter").map((c) => c[1]);
+
+test("a photograph keeps its own colours in the dark theme", () => {
+  // renderElement.ts:400-404: `shouldInvertImage` is false for anything that is
+  // not an SVG, and the image is drawn with no filter at all. A picture is not a
+  // palette, and inverting one is not a theme.
+  const { ctx, img } = imageScene("image/png", "dark");
+  expect(ctx.calls.some((c) => c[0] === "drawImage" && c[1] === img)).toBe(true);
+  expect(filtersUsed(ctx)).toEqual([]);
+});
+
+test("an SVG is line art, so the dark theme does reach it", () => {
+  // The one exception upstream makes, and for a reason worth keeping: an .svg
+  // dropped into a drawing is nearly always strokes authored in black on
+  // nothing, so it *is* a palette and goes through the same transform they do.
+  const { ctx } = imageScene("image/svg+xml", "dark");
+  expect(filtersUsed(ctx)).toEqual([THEME_FILTER, "none"]);
+});
+
+test("in the light theme no image is filtered, SVG or not", () => {
+  for (const mime of ["image/png", "image/svg+xml", "", undefined]) {
+    expect(filtersUsed(imageScene(mime, "light").ctx)).toEqual([]);
+  }
+});
+
+test("the painter takes its theme from the caller, not only from the file", () => {
+  // The window's appearance is the one theme control, so the editor hands the
+  // painter what the window is wearing. A caller with nothing to say still gets
+  // the file's own answer, which is what a read-only pane wants.
+  const light = shape({ type: "rectangle" });
+  const strokeOf = (scene, theme) => {
+    const rc = roughRecorder();
+    drawElement(recorder(), rc, light, scene, new Map(), theme);
+    return rc.last().options.stroke;
+  };
+  expect(strokeOf({ appState: { theme: "light" } }, "dark")).toBe("#d3d3d3");
+  expect(strokeOf({ appState: { theme: "dark" } }, "light")).toBe("#1e1e1e");
+  expect(strokeOf({ appState: { theme: "dark" } }, undefined)).toBe("#d3d3d3");
 });
 
 test("a freedraw outline is closed with quadratics, not straight segments", () => {

@@ -110,6 +110,17 @@ let defaultWidth = 0;
 let defaultHeight = 0;
 
 export class FakeNode {
+  /// The document this node belongs to, as a real one reports it.
+  ///
+  /// A getter rather than a field because `installDom` builds the document out
+  /// of `FakeNode`s, so there is nothing to hand a constructor yet when the
+  /// first of them is made. The view reads this to find <html> — which is where
+  /// a host writes the appearance it has resolved, and therefore the theme the
+  /// drawing is painted in.
+  get ownerDocument() {
+    return globalThis.document ?? null;
+  }
+
   constructor(tag) {
     this.tagName = String(tag).toUpperCase();
     this.children = [];
@@ -269,11 +280,18 @@ export function installDom({ width = 0, height = 0, context = () => null } = {})
   // stubbed with no-ops so it lands in the same ledger as every other
   // listener: one that outlived its menu is exactly the leak this file counts.
   const docNode = new FakeNode("document");
+  // <html>. Real because the view reads `data-theme` off it to know which theme
+  // to paint in — the app's appearance control resolves light/dark/system down
+  // to that one attribute, and with no element to read the view would fall back
+  // to the file's own theme in every test and the app's would never be exercised.
+  const root = new FakeNode("html");
   globalThis.document = {
     createElement: (tag) => new FakeNode(tag),
+    documentElement: root,
     head,
     body: new FakeNode("body"),
     getElementById: () => null,
+    querySelector: () => null,
     querySelectorAll: () => [],
     addEventListener: (type, fn, opts) => docNode.addEventListener(type, fn, opts),
     removeEventListener: (type, fn, opts) => docNode.removeEventListener(type, fn, opts),
@@ -282,6 +300,19 @@ export function installDom({ width = 0, height = 0, context = () => null } = {})
   const win = new FakeNode("window");
   win.devicePixelRatio = 1;
   globalThis.window = win;
+  // Where the appearance preference lives, and the only browser storage this
+  // app uses. Real rather than absent because "absent" is a case the code under
+  // test already handles by falling back to the default — so with no store at
+  // all, every test of a *remembered* choice quietly asserts the default.
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(String(key)) ? store.get(String(key)) : null),
+    setItem: (key, value) => store.set(String(key), String(value)),
+    removeItem: (key) => store.delete(String(key)),
+    clear: () => store.clear(),
+    key: (i) => [...store.keys()][i] ?? null,
+    get length() { return store.size; },
+  };
   globalThis.ResizeObserver = FakeResizeObserver;
   globalThis.requestAnimationFrame = (fn) => {
     const id = ++frameSeq;
@@ -294,6 +325,7 @@ export function installDom({ width = 0, height = 0, context = () => null } = {})
 export function uninstallDom() {
   delete globalThis.document;
   delete globalThis.window;
+  delete globalThis.localStorage;
   delete globalThis.ResizeObserver;
   delete globalThis.requestAnimationFrame;
   delete globalThis.cancelAnimationFrame;
